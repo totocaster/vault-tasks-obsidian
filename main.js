@@ -31,6 +31,9 @@ module.exports = __toCommonJS(main_exports);
 var import_obsidian = require("obsidian");
 var VIEW_TYPE_TASKS = "vault-tasks-view";
 var VIEW_TITLE = "Vault tasks";
+var DEFERRED_UNTIL_KEY = "deffered-until";
+var HIDDEN_FROM_TASKS_KEY = "hide-from-vault-tasks";
+var FRONTMATTER_PATTERN = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/;
 var TASK_LINE_PATTERN = /^(\s*(?:[-*+]|\d+[.)])\s+\[)(.)(\].*)$/;
 var TASK_TEXT_PATTERN = /^\s*(?:[-*+]|\d+[.)])\s+\[.\]\s?(.*)$/;
 var VaultTasksPlugin = class extends import_obsidian.Plugin {
@@ -241,6 +244,61 @@ var VaultTasksPlugin = class extends import_obsidian.Plugin {
       return false;
     }
   }
+  async setDeferredUntil(file, deferredUntil) {
+    try {
+      await this.app.fileManager.processFrontMatter(file, (frontmatter) => {
+        frontmatter[DEFERRED_UNTIL_KEY] = deferredUntil;
+      });
+      await this.refreshIndex();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Could not update the defer-until date.";
+      new import_obsidian.Notice(message);
+    }
+  }
+  async hideFromTaskList(file) {
+    try {
+      await this.app.fileManager.processFrontMatter(file, (frontmatter) => {
+        frontmatter[HIDDEN_FROM_TASKS_KEY] = true;
+      });
+      await this.refreshIndex();
+      new import_obsidian.Notice(
+        `Hidden from vault tasks. Remove \`${HIDDEN_FROM_TASKS_KEY}: true\` to show it again.`
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Could not hide the note from the task list.";
+      new import_obsidian.Notice(message);
+    }
+  }
+  async setAllTasksCompletion(file, completed) {
+    var _a;
+    let updatedCount = 0;
+    try {
+      this.autoRefreshPaused = true;
+      const activeView = this.app.workspace.getActiveViewOfType(import_obsidian.MarkdownView);
+      if (((_a = activeView == null ? void 0 : activeView.file) == null ? void 0 : _a.path) === file.path) {
+        updatedCount = updateAllTasksInEditor(activeView.editor, completed);
+      } else {
+        await this.app.vault.process(file, (content) => {
+          const result = updateAllTasksInContent(content, completed);
+          updatedCount = result.updatedCount;
+          return result.content;
+        });
+      }
+      this.autoRefreshPaused = false;
+      this.manualRefreshRequired = false;
+      await this.updateHeaderControls();
+      if (updatedCount === 0) {
+        new import_obsidian.Notice(completed ? "No open tasks to complete." : "No completed tasks to cancel.");
+        return;
+      }
+      await this.refreshIndex();
+    } catch (error) {
+      this.autoRefreshPaused = false;
+      const message = error instanceof Error ? error.message : "Could not update the tasks in this note.";
+      new import_obsidian.Notice(message);
+      await this.updateHeaderControls();
+    }
+  }
   async buildTaskGroups() {
     const taskFiles = this.app.vault.getMarkdownFiles().flatMap((file) => {
       const taskItems = getTaskListItems(this.app.metadataCache.getFileCache(file));
@@ -251,16 +309,19 @@ var VaultTasksPlugin = class extends import_obsidian.Plugin {
     });
     const groups = await Promise.all(
       taskFiles.map(async ({ file, taskItems }) => {
-        const lines = (await this.app.vault.cachedRead(file)).split(/\r?\n/);
+        const content = await this.app.vault.cachedRead(file);
+        const lines = content.split(/\r?\n/);
         const tasks = taskItems.map((taskItem) => buildTaskItem(file, taskItem, lines)).filter((task) => task !== null).sort((left, right) => left.line - right.line);
         return {
+          deferredUntil: extractDeferredUntil(content),
           file,
+          hiddenFromTaskList: extractHiddenFromTaskList(content),
           noteTitle: file.basename,
           tasks
         };
       })
     );
-    return groups.filter((group) => group.tasks.length > 0).sort((left, right) => left.noteTitle.localeCompare(right.noteTitle));
+    return groups.filter((group) => group.tasks.length > 0 && !group.hiddenFromTaskList).sort((left, right) => left.noteTitle.localeCompare(right.noteTitle));
   }
   getMainTaskLeaf() {
     let taskLeaf = null;
@@ -276,6 +337,7 @@ var VaultTasksPlugin = class extends import_obsidian.Plugin {
     return file instanceof import_obsidian.TFile && file.extension === "md";
   }
   getBacklinkFiles(file) {
+    var _a;
     const backlinks = /* @__PURE__ */ new Map();
     const resolvedLinks = this.app.metadataCache.resolvedLinks;
     for (const [sourcePath, links] of Object.entries(resolvedLinks)) {
@@ -283,7 +345,7 @@ var VaultTasksPlugin = class extends import_obsidian.Plugin {
         continue;
       }
       const sourceFile = this.app.vault.getAbstractFileByPath(sourcePath);
-      if (sourceFile instanceof import_obsidian.TFile && sourceFile.extension === "md") {
+      if (sourceFile instanceof import_obsidian.TFile && sourceFile.extension === "md" && !isHiddenFromTaskListFrontmatter((_a = this.app.metadataCache.getFileCache(sourceFile)) == null ? void 0 : _a.frontmatter)) {
         backlinks.set(sourceFile.path, sourceFile);
       }
     }
@@ -418,7 +480,7 @@ var VaultTasksView = class extends import_obsidian.ItemView {
   async render() {
     var _a;
     const snapshot = this.plugin.getSnapshot();
-    const { markdown, renderedTasks } = buildRenderedDocument(
+    const { markdown, renderedGroups, renderedTasks } = buildRenderedDocument(
       snapshot,
       this.app.metadataCache,
       (file) => this.plugin.getBacklinkFiles(file)
@@ -460,11 +522,14 @@ var VaultTasksView = class extends import_obsidian.ItemView {
       this.renderedTasks.set(task.key, task);
       this.addJumpButton(checkbox, task);
     }
-    if (snapshot.showConnections) {
-      const headings = Array.from(sizerEl.querySelectorAll("h2"));
-      for (const headingEl of headings) {
-        this.decorateConnectionsContext(headingEl);
+    const headings = Array.from(sizerEl.querySelectorAll("h2"));
+    for (const [index, headingEl] of headings.entries()) {
+      const group = renderedGroups[index];
+      if (!group) {
+        continue;
       }
+      this.bindHeadingMenu(headingEl, group);
+      this.decorateHeadingContext(headingEl);
     }
   }
   updateHeaderControls() {
@@ -589,31 +654,134 @@ var VaultTasksView = class extends import_obsidian.ItemView {
     });
     listItemEl.appendChild(jumpButtonEl);
   }
-  decorateConnectionsContext(headingEl) {
-    var _a, _b;
+  bindHeadingMenu(headingEl, group) {
+    const titleLinkEl = headingEl.querySelector("a.internal-link");
+    if (!titleLinkEl) {
+      return;
+    }
+    this.registerDomEvent(titleLinkEl, "contextmenu", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      const menu = new import_obsidian.Menu();
+      menu.addItem((item) => {
+        item.setTitle("Defer until").setIcon("calendar-days").onClick(() => {
+          new DeferUntilModal(
+            this.app,
+            group.noteTitle,
+            group.deferredUntil,
+            async (deferredUntil) => {
+              await this.plugin.setDeferredUntil(group.file, deferredUntil);
+            }
+          ).open();
+        });
+      });
+      menu.addItem((item) => {
+        item.setTitle("Complete all").setIcon("check").onClick(() => {
+          void this.plugin.setAllTasksCompletion(group.file, true);
+        });
+      });
+      menu.addItem((item) => {
+        item.setTitle("Cancel all").setIcon("circle").onClick(() => {
+          void this.plugin.setAllTasksCompletion(group.file, false);
+        });
+      });
+      menu.addItem((item) => {
+        item.setTitle("Hide").setIcon("eye-off").onClick(() => {
+          void this.plugin.hideFromTaskList(group.file);
+        });
+      });
+      menu.showAtMouseEvent(event);
+    });
+  }
+  decorateHeadingContext(headingEl) {
+    var _a, _b, _c;
     const headingBlockEl = (_a = headingEl.closest(".el-h2")) != null ? _a : headingEl;
-    const nextBlockEl = headingBlockEl.nextElementSibling;
-    if (!nextBlockEl) {
+    let nextBlockEl = headingBlockEl.nextElementSibling;
+    while (nextBlockEl) {
+      const paragraphEl = nextBlockEl instanceof HTMLParagraphElement ? nextBlockEl : nextBlockEl.querySelector(":scope > p");
+      if (!(paragraphEl instanceof HTMLParagraphElement)) {
+        return;
+      }
+      const text = (_c = (_b = paragraphEl.textContent) == null ? void 0 : _b.trim()) != null ? _c : "";
+      if (text.startsWith("Deferred until:")) {
+        paragraphEl.addClass("vault-tasks-view__deferred");
+        nextBlockEl = nextBlockEl.nextElementSibling;
+        continue;
+      }
+      if (text.startsWith("Related to:")) {
+        paragraphEl.addClass("vault-tasks-view__connections");
+        const linkEls = Array.from(
+          paragraphEl.querySelectorAll("a.internal-link")
+        );
+        for (const linkEl of linkEls) {
+          linkEl.addClass("vault-tasks-view__connections-link");
+        }
+        nextBlockEl = nextBlockEl.nextElementSibling;
+        continue;
+      }
       return;
     }
-    const paragraphEl = nextBlockEl instanceof HTMLParagraphElement ? nextBlockEl : nextBlockEl.querySelector(":scope > p");
-    if (!(paragraphEl instanceof HTMLParagraphElement)) {
+  }
+};
+var DeferUntilModal = class extends import_obsidian.Modal {
+  constructor(app, noteTitle, currentDeferredUntil, onSubmitDate) {
+    super(app);
+    this.noteTitle = noteTitle;
+    this.currentDeferredUntil = currentDeferredUntil;
+    this.onSubmitDate = onSubmitDate;
+    this.dateInputEl = null;
+    this.minimumDate = getTomorrowDateString();
+  }
+  onOpen() {
+    var _a;
+    this.setTitle("Defer until");
+    new import_obsidian.Setting(this.contentEl).setName(this.noteTitle).setDesc("Pending tasks from this note stay hidden until this date.").addText((component) => {
+      component.inputEl.type = "date";
+      component.inputEl.min = this.minimumDate;
+      component.setValue(this.getInitialDateValue());
+      this.dateInputEl = component.inputEl;
+      component.inputEl.addEventListener("keydown", (event) => {
+        if (event.key !== "Enter") {
+          return;
+        }
+        event.preventDefault();
+        void this.submit();
+      });
+    });
+    new import_obsidian.Setting(this.contentEl).addButton((button) => {
+      button.setButtonText("Cancel").onClick(() => {
+        this.close();
+      });
+    }).addButton((button) => {
+      button.setButtonText("Save").setCta().onClick(() => {
+        void this.submit();
+      });
+    });
+    (_a = this.dateInputEl) == null ? void 0 : _a.focus();
+    window.setTimeout(() => {
+      var _a2;
+      const dateInputEl = this.dateInputEl;
+      try {
+        (_a2 = dateInputEl == null ? void 0 : dateInputEl.showPicker) == null ? void 0 : _a2.call(dateInputEl);
+      } catch (e) {
+      }
+    }, 0);
+  }
+  getInitialDateValue() {
+    if (this.currentDeferredUntil && this.currentDeferredUntil >= this.minimumDate) {
+      return this.currentDeferredUntil;
+    }
+    return this.minimumDate;
+  }
+  async submit() {
+    var _a, _b;
+    const deferredUntil = (_b = (_a = this.dateInputEl) == null ? void 0 : _a.value) != null ? _b : "";
+    if (!isFutureDate(deferredUntil)) {
+      new import_obsidian.Notice("Choose a future date.");
       return;
     }
-    if (!((_b = paragraphEl.textContent) == null ? void 0 : _b.trim().startsWith("Related to:"))) {
-      return;
-    }
-    paragraphEl.addClass("vault-tasks-view__connections");
-    const labelEl = paragraphEl.querySelector("span");
-    if (labelEl instanceof HTMLSpanElement) {
-      labelEl.addClass("vault-tasks-view__connections-label");
-    }
-    const linkEls = Array.from(
-      paragraphEl.querySelectorAll("a.internal-link")
-    );
-    for (const linkEl of linkEls) {
-      linkEl.addClass("vault-tasks-view__connections-link");
-    }
+    await this.onSubmitDate(deferredUntil);
+    this.close();
   }
 };
 function buildRenderedDocument(snapshot, metadataCache, getBacklinkFiles) {
@@ -621,7 +789,11 @@ function buildRenderedDocument(snapshot, metadataCache, getBacklinkFiles) {
   const sections = [];
   const renderedGroups = [];
   const renderedTasks = [];
+  const today = getTodayDateString();
   for (const group of snapshot.groups) {
+    if (snapshot.filter === "pending" && isDeferred(group.deferredUntil, today)) {
+      continue;
+    }
     const visibleTasks = group.tasks.filter((task) => matchesFilter(task, snapshot.filter));
     if (visibleTasks.length === 0) {
       continue;
@@ -630,6 +802,9 @@ function buildRenderedDocument(snapshot, metadataCache, getBacklinkFiles) {
     const noteTitle = escapeWikiLinkText(group.noteTitle);
     sections.push(`## [[${linkText}|${noteTitle}]]`);
     renderedGroups.push(group);
+    if (snapshot.filter === "all" && group.deferredUntil) {
+      sections.push(buildDeferredUntilLine(group.deferredUntil));
+    }
     if (snapshot.showConnections) {
       const backlinks = getBacklinkFiles(group.file);
       if (backlinks.length > 0) {
@@ -655,6 +830,9 @@ function buildRenderedDocument(snapshot, metadataCache, getBacklinkFiles) {
     renderedGroups,
     renderedTasks
   };
+}
+function buildDeferredUntilLine(deferredUntil) {
+  return `<span class="vault-tasks-view__deferred-label">Deferred until:</span> ${deferredUntil}`;
 }
 function buildConnectionsLine(backlinks, metadataCache) {
   const renderedLinks = backlinks.map((backlinkFile) => {
@@ -697,6 +875,13 @@ function extractTaskText(rawLine) {
   const match = rawLine.match(TASK_TEXT_PATTERN);
   return match ? match[1] : null;
 }
+function extractDeferredUntil(content) {
+  return normalizeDeferredUntil(extractFrontmatterValue(content, DEFERRED_UNTIL_KEY));
+}
+function extractHiddenFromTaskList(content) {
+  var _a;
+  return (_a = normalizeFrontmatterBoolean(extractFrontmatterValue(content, HIDDEN_FROM_TASKS_KEY))) != null ? _a : false;
+}
 function filterLabel(filter) {
   switch (filter) {
     case "pending":
@@ -726,6 +911,27 @@ function filterDescription(filter) {
     default:
       return "all";
   }
+}
+function getTodayDateString() {
+  return formatDate(/* @__PURE__ */ new Date());
+}
+function getTomorrowDateString() {
+  const tomorrow = /* @__PURE__ */ new Date();
+  tomorrow.setDate(tomorrow.getDate() + 1);
+  return formatDate(tomorrow);
+}
+function isDeferred(deferredUntil, today) {
+  return deferredUntil !== null && deferredUntil > today;
+}
+function isFutureDate(date) {
+  return DATE_PATTERN.test(date) && date >= getTomorrowDateString();
+}
+function isHiddenFromTaskListFrontmatter(frontmatter) {
+  var _a;
+  if (!frontmatter) {
+    return false;
+  }
+  return (_a = normalizeFrontmatterBoolean(frontmatter[HIDDEN_FROM_TASKS_KEY])) != null ? _a : false;
 }
 function findTaskLine(lines, task) {
   const currentLine = lines[task.line];
@@ -768,6 +974,19 @@ function setTaskCompletion(rawLine, completed) {
   }
   return `${match[1]}${completed ? "x" : " "}${match[3]}`;
 }
+function updateAllTasksInEditor(editor, completed) {
+  let updatedCount = 0;
+  for (let index = 0; index < editor.lineCount(); index += 1) {
+    const rawLine = editor.getLine(index);
+    const nextLine = setTaskCompletion(rawLine, completed);
+    if (nextLine === null || nextLine === rawLine) {
+      continue;
+    }
+    editor.setLine(index, nextLine);
+    updatedCount += 1;
+  }
+  return updatedCount;
+}
 function updateTaskInContent(content, task, completed) {
   const newline = content.includes("\r\n") ? "\r\n" : "\n";
   const lines = content.split(/\r?\n/);
@@ -781,4 +1000,69 @@ function updateTaskInContent(content, task, completed) {
   }
   lines[targetLine] = nextLine;
   return lines.join(newline);
+}
+function updateAllTasksInContent(content, completed) {
+  const newline = content.includes("\r\n") ? "\r\n" : "\n";
+  const lines = content.split(/\r?\n/);
+  let updatedCount = 0;
+  for (let index = 0; index < lines.length; index += 1) {
+    const rawLine = lines[index];
+    const nextLine = setTaskCompletion(rawLine, completed);
+    if (nextLine === null || nextLine === rawLine) {
+      continue;
+    }
+    lines[index] = nextLine;
+    updatedCount += 1;
+  }
+  return {
+    content: lines.join(newline),
+    updatedCount
+  };
+}
+var DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
+function formatDate(date) {
+  const year = String(date.getFullYear());
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+function normalizeDeferredUntil(value) {
+  const unquotedValue = unquoteFrontmatterValue(value);
+  return DATE_PATTERN.test(unquotedValue) ? unquotedValue : null;
+}
+function extractFrontmatterValue(content, key) {
+  const frontmatterMatch = content.match(FRONTMATTER_PATTERN);
+  if (!frontmatterMatch) {
+    return null;
+  }
+  const frontmatter = frontmatterMatch[1];
+  const valueMatch = frontmatter.match(new RegExp(`^${key}:\\s*(.+?)\\s*$`, "m"));
+  return valueMatch ? valueMatch[1] : null;
+}
+function normalizeFrontmatterBoolean(value) {
+  if (typeof value === "boolean") {
+    return value;
+  }
+  if (typeof value !== "string") {
+    return null;
+  }
+  switch (unquoteFrontmatterValue(value).toLowerCase()) {
+    case "true":
+    case "yes":
+    case "on":
+      return true;
+    case "false":
+    case "no":
+    case "off":
+      return false;
+    default:
+      return null;
+  }
+}
+function unquoteFrontmatterValue(value) {
+  if (value === null) {
+    return "";
+  }
+  const trimmedValue = value.trim();
+  return trimmedValue.startsWith('"') && trimmedValue.endsWith('"') || trimmedValue.startsWith("'") && trimmedValue.endsWith("'") ? trimmedValue.slice(1, -1) : trimmedValue;
 }

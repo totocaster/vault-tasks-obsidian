@@ -75,17 +75,21 @@
 	text-decoration: underline;
 }
 
-.vault-tasks-view__connections {
+.vault-tasks-view__connections,
+.vault-tasks-view__deferred {
 	margin-block-start: calc(var(--size-4-1) * -0.5);
 	margin-block-end: var(--size-4-2);
 	margin-inline-end: 0;
 	margin-inline-start: 0 !important;
 	padding-inline-start: 0 !important;
-	text-indent: 0;
-	color: var(--text-muted);
 	font-size: var(--font-ui-small);
 	font-weight: var(--font-normal);
 	line-height: inherit;
+	text-indent: 0;
+}
+
+.vault-tasks-view__connections {
+	color: var(--text-muted);
 }
 
 .vault-tasks-view__connections-label {
@@ -99,4 +103,12 @@
 
 .vault-tasks-view__connections-link:hover {
 	color: var(--text-accent);
+}
+
+.vault-tasks-view__deferred {
+	color: var(--text-normal);
+}
+
+.vault-tasks-view__deferred-label {
+	color: var(--text-normal);
 }

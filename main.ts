@@ -8,8 +8,11 @@ import {
 	ListItemCache,
 	MarkdownRenderer,
 	MarkdownView,
+	Menu,
+	Modal,
 	Notice,
 	Plugin,
+	Setting,
 	setIcon,
 	TFile,
 	WorkspaceLeaf,
@@ -17,6 +20,9 @@ import {
 
 const VIEW_TYPE_TASKS = "vault-tasks-view";
 const VIEW_TITLE = "Vault tasks";
+const DEFERRED_UNTIL_KEY = "deffered-until";
+const HIDDEN_FROM_TASKS_KEY = "hide-from-vault-tasks";
+const FRONTMATTER_PATTERN = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/;
 const TASK_LINE_PATTERN = /^(\s*(?:[-*+]|\d+[.)])\s+\[)(.)(\].*)$/;
 const TASK_TEXT_PATTERN = /^\s*(?:[-*+]|\d+[.)])\s+\[.\]\s?(.*)$/;
 
@@ -33,7 +39,9 @@ interface TaskItem {
 }
 
 interface TaskGroup {
+	deferredUntil: string | null;
 	file: TFile;
+	hiddenFromTaskList: boolean;
 	noteTitle: string;
 	tasks: TaskItem[];
 }
@@ -287,6 +295,71 @@ export default class VaultTasksPlugin extends Plugin {
 		}
 	}
 
+	async setDeferredUntil(file: TFile, deferredUntil: string): Promise<void> {
+		try {
+			await this.app.fileManager.processFrontMatter(file, (frontmatter) => {
+				frontmatter[DEFERRED_UNTIL_KEY] = deferredUntil;
+			});
+			await this.refreshIndex();
+		} catch (error) {
+			const message =
+				error instanceof Error ? error.message : "Could not update the defer-until date.";
+			new Notice(message);
+		}
+	}
+
+	async hideFromTaskList(file: TFile): Promise<void> {
+		try {
+			await this.app.fileManager.processFrontMatter(file, (frontmatter) => {
+				frontmatter[HIDDEN_FROM_TASKS_KEY] = true;
+			});
+			await this.refreshIndex();
+			new Notice(
+				`Hidden from vault tasks. Remove \`${HIDDEN_FROM_TASKS_KEY}: true\` to show it again.`,
+			);
+		} catch (error) {
+			const message =
+				error instanceof Error ? error.message : "Could not hide the note from the task list.";
+			new Notice(message);
+		}
+	}
+
+	async setAllTasksCompletion(file: TFile, completed: boolean): Promise<void> {
+		let updatedCount = 0;
+
+		try {
+			this.autoRefreshPaused = true;
+			const activeView = this.app.workspace.getActiveViewOfType(MarkdownView);
+
+			if (activeView?.file?.path === file.path) {
+				updatedCount = updateAllTasksInEditor(activeView.editor, completed);
+			} else {
+				await this.app.vault.process(file, (content) => {
+					const result = updateAllTasksInContent(content, completed);
+					updatedCount = result.updatedCount;
+					return result.content;
+				});
+			}
+
+			this.autoRefreshPaused = false;
+			this.manualRefreshRequired = false;
+			await this.updateHeaderControls();
+
+			if (updatedCount === 0) {
+				new Notice(completed ? "No open tasks to complete." : "No completed tasks to cancel.");
+				return;
+			}
+
+			await this.refreshIndex();
+		} catch (error) {
+			this.autoRefreshPaused = false;
+			const message =
+				error instanceof Error ? error.message : "Could not update the tasks in this note.";
+			new Notice(message);
+			await this.updateHeaderControls();
+		}
+	}
+
 	private async buildTaskGroups(): Promise<TaskGroup[]> {
 		const taskFiles = this.app.vault.getMarkdownFiles().flatMap((file) => {
 			const taskItems = getTaskListItems(this.app.metadataCache.getFileCache(file));
@@ -300,14 +373,17 @@ export default class VaultTasksPlugin extends Plugin {
 
 		const groups = await Promise.all(
 			taskFiles.map(async ({ file, taskItems }) => {
-				const lines = (await this.app.vault.cachedRead(file)).split(/\r?\n/);
+				const content = await this.app.vault.cachedRead(file);
+				const lines = content.split(/\r?\n/);
 				const tasks = taskItems
 					.map((taskItem) => buildTaskItem(file, taskItem, lines))
 					.filter((task): task is TaskItem => task !== null)
 					.sort((left, right) => left.line - right.line);
 
 				return {
+					deferredUntil: extractDeferredUntil(content),
 					file,
+					hiddenFromTaskList: extractHiddenFromTaskList(content),
 					noteTitle: file.basename,
 					tasks,
 				};
@@ -315,7 +391,7 @@ export default class VaultTasksPlugin extends Plugin {
 		);
 
 		return groups
-			.filter((group) => group.tasks.length > 0)
+			.filter((group) => group.tasks.length > 0 && !group.hiddenFromTaskList)
 			.sort((left, right) => left.noteTitle.localeCompare(right.noteTitle));
 	}
 
@@ -347,7 +423,11 @@ export default class VaultTasksPlugin extends Plugin {
 			}
 
 			const sourceFile = this.app.vault.getAbstractFileByPath(sourcePath);
-			if (sourceFile instanceof TFile && sourceFile.extension === "md") {
+			if (
+				sourceFile instanceof TFile &&
+				sourceFile.extension === "md" &&
+				!isHiddenFromTaskListFrontmatter(this.app.metadataCache.getFileCache(sourceFile)?.frontmatter)
+			) {
 				backlinks.set(sourceFile.path, sourceFile);
 			}
 		}
@@ -517,7 +597,7 @@ class VaultTasksView extends ItemView {
 
 	async render(): Promise<void> {
 		const snapshot = this.plugin.getSnapshot();
-		const { markdown, renderedTasks } = buildRenderedDocument(
+		const { markdown, renderedGroups, renderedTasks } = buildRenderedDocument(
 			snapshot,
 			this.app.metadataCache,
 			(file) => this.plugin.getBacklinkFiles(file),
@@ -568,12 +648,17 @@ class VaultTasksView extends ItemView {
 			this.addJumpButton(checkbox, task);
 		}
 
-		if (snapshot.showConnections) {
-			const headings = Array.from(sizerEl.querySelectorAll<HTMLHeadingElement>("h2"));
+		const headings = Array.from(sizerEl.querySelectorAll<HTMLHeadingElement>("h2"));
 
-			for (const headingEl of headings) {
-				this.decorateConnectionsContext(headingEl);
+		for (const [index, headingEl] of headings.entries()) {
+			const group = renderedGroups[index];
+
+			if (!group) {
+				continue;
 			}
+
+			this.bindHeadingMenu(headingEl, group);
+			this.decorateHeadingContext(headingEl);
 		}
 	}
 
@@ -729,40 +814,178 @@ class VaultTasksView extends ItemView {
 		listItemEl.appendChild(jumpButtonEl);
 	}
 
-	private decorateConnectionsContext(headingEl: HTMLHeadingElement): void {
+	private bindHeadingMenu(headingEl: HTMLHeadingElement, group: TaskGroup): void {
+		const titleLinkEl = headingEl.querySelector<HTMLAnchorElement>("a.internal-link");
+		if (!titleLinkEl) {
+			return;
+		}
+
+		this.registerDomEvent(titleLinkEl, "contextmenu", (event) => {
+			event.preventDefault();
+			event.stopPropagation();
+
+			const menu = new Menu();
+			menu.addItem((item) => {
+				item
+					.setTitle("Defer until")
+					.setIcon("calendar-days")
+					.onClick(() => {
+						new DeferUntilModal(
+							this.app,
+							group.noteTitle,
+							group.deferredUntil,
+							async (deferredUntil) => {
+								await this.plugin.setDeferredUntil(group.file, deferredUntil);
+							},
+						).open();
+					});
+			});
+			menu.addItem((item) => {
+				item
+					.setTitle("Complete all")
+					.setIcon("check")
+					.onClick(() => {
+						void this.plugin.setAllTasksCompletion(group.file, true);
+					});
+			});
+			menu.addItem((item) => {
+				item
+					.setTitle("Cancel all")
+					.setIcon("circle")
+					.onClick(() => {
+						void this.plugin.setAllTasksCompletion(group.file, false);
+					});
+			});
+			menu.addItem((item) => {
+				item
+					.setTitle("Hide")
+					.setIcon("eye-off")
+					.onClick(() => {
+						void this.plugin.hideFromTaskList(group.file);
+					});
+			});
+			menu.showAtMouseEvent(event);
+		});
+	}
+
+	private decorateHeadingContext(headingEl: HTMLHeadingElement): void {
 		const headingBlockEl = headingEl.closest(".el-h2") ?? headingEl;
-		const nextBlockEl = headingBlockEl.nextElementSibling;
+		let nextBlockEl = headingBlockEl.nextElementSibling;
 
-		if (!nextBlockEl) {
+		while (nextBlockEl) {
+			const paragraphEl =
+				nextBlockEl instanceof HTMLParagraphElement
+					? nextBlockEl
+					: nextBlockEl.querySelector(":scope > p");
+
+			if (!(paragraphEl instanceof HTMLParagraphElement)) {
+				return;
+			}
+
+			const text = paragraphEl.textContent?.trim() ?? "";
+
+			if (text.startsWith("Deferred until:")) {
+				paragraphEl.addClass("vault-tasks-view__deferred");
+				nextBlockEl = nextBlockEl.nextElementSibling;
+				continue;
+			}
+
+			if (text.startsWith("Related to:")) {
+				paragraphEl.addClass("vault-tasks-view__connections");
+
+				const linkEls = Array.from(
+					paragraphEl.querySelectorAll<HTMLAnchorElement>("a.internal-link"),
+				);
+				for (const linkEl of linkEls) {
+					linkEl.addClass("vault-tasks-view__connections-link");
+				}
+				nextBlockEl = nextBlockEl.nextElementSibling;
+				continue;
+			}
+
+			return;
+		}
+	}
+}
+
+class DeferUntilModal extends Modal {
+	private dateInputEl: HTMLInputElement | null = null;
+	private readonly minimumDate = getTomorrowDateString();
+
+	constructor(
+		app: VaultTasksPlugin["app"],
+		private readonly noteTitle: string,
+		private readonly currentDeferredUntil: string | null,
+		private readonly onSubmitDate: (deferredUntil: string) => Promise<void>,
+	) {
+		super(app);
+	}
+
+	onOpen(): void {
+		this.setTitle("Defer until");
+
+		new Setting(this.contentEl)
+			.setName(this.noteTitle)
+			.setDesc("Pending tasks from this note stay hidden until this date.")
+			.addText((component) => {
+				component.inputEl.type = "date";
+				component.inputEl.min = this.minimumDate;
+				component.setValue(this.getInitialDateValue());
+				this.dateInputEl = component.inputEl;
+
+				component.inputEl.addEventListener("keydown", (event) => {
+					if (event.key !== "Enter") {
+						return;
+					}
+
+					event.preventDefault();
+					void this.submit();
+				});
+			});
+
+		new Setting(this.contentEl)
+			.addButton((button) => {
+				button.setButtonText("Cancel").onClick(() => {
+					this.close();
+				});
+			})
+			.addButton((button) => {
+				button.setButtonText("Save").setCta().onClick(() => {
+					void this.submit();
+				});
+			});
+
+		this.dateInputEl?.focus();
+		window.setTimeout(() => {
+			const dateInputEl = this.dateInputEl as (HTMLInputElement & {
+				showPicker?: () => void;
+			}) | null;
+			try {
+				dateInputEl?.showPicker?.();
+			} catch {
+				// Ignore unsupported or blocked picker calls.
+			}
+		}, 0);
+	}
+
+	private getInitialDateValue(): string {
+		if (this.currentDeferredUntil && this.currentDeferredUntil >= this.minimumDate) {
+			return this.currentDeferredUntil;
+		}
+
+		return this.minimumDate;
+	}
+
+	private async submit(): Promise<void> {
+		const deferredUntil = this.dateInputEl?.value ?? "";
+
+		if (!isFutureDate(deferredUntil)) {
+			new Notice("Choose a future date.");
 			return;
 		}
 
-		const paragraphEl =
-			nextBlockEl instanceof HTMLParagraphElement
-				? nextBlockEl
-				: nextBlockEl.querySelector(":scope > p");
-
-		if (!(paragraphEl instanceof HTMLParagraphElement)) {
-			return;
-		}
-
-		if (!paragraphEl.textContent?.trim().startsWith("Related to:")) {
-			return;
-		}
-
-		paragraphEl.addClass("vault-tasks-view__connections");
-
-		const labelEl = paragraphEl.querySelector("span");
-		if (labelEl instanceof HTMLSpanElement) {
-			labelEl.addClass("vault-tasks-view__connections-label");
-		}
-
-		const linkEls = Array.from(
-			paragraphEl.querySelectorAll<HTMLAnchorElement>("a.internal-link"),
-		);
-		for (const linkEl of linkEls) {
-			linkEl.addClass("vault-tasks-view__connections-link");
-		}
+		await this.onSubmitDate(deferredUntil);
+		this.close();
 	}
 }
 
@@ -774,8 +997,13 @@ function buildRenderedDocument(
 	const sections: string[] = [];
 	const renderedGroups: TaskGroup[] = [];
 	const renderedTasks: TaskItem[] = [];
+	const today = getTodayDateString();
 
 	for (const group of snapshot.groups) {
+		if (snapshot.filter === "pending" && isDeferred(group.deferredUntil, today)) {
+			continue;
+		}
+
 		const visibleTasks = group.tasks.filter((task) => matchesFilter(task, snapshot.filter));
 
 		if (visibleTasks.length === 0) {
@@ -787,6 +1015,10 @@ function buildRenderedDocument(
 
 		sections.push(`## [[${linkText}|${noteTitle}]]`);
 		renderedGroups.push(group);
+
+		if (snapshot.filter === "all" && group.deferredUntil) {
+			sections.push(buildDeferredUntilLine(group.deferredUntil));
+		}
 
 		if (snapshot.showConnections) {
 			const backlinks = getBacklinkFiles(group.file);
@@ -821,6 +1053,10 @@ function buildRenderedDocument(
 		renderedGroups,
 		renderedTasks,
 	};
+}
+
+function buildDeferredUntilLine(deferredUntil: string): string {
+	return `<span class="vault-tasks-view__deferred-label">Deferred until:</span> ${deferredUntil}`;
 }
 
 function buildConnectionsLine(
@@ -878,6 +1114,14 @@ function extractTaskText(rawLine: string): string | null {
 	return match ? match[1] : null;
 }
 
+function extractDeferredUntil(content: string): string | null {
+	return normalizeDeferredUntil(extractFrontmatterValue(content, DEFERRED_UNTIL_KEY));
+}
+
+function extractHiddenFromTaskList(content: string): boolean {
+	return normalizeFrontmatterBoolean(extractFrontmatterValue(content, HIDDEN_FROM_TASKS_KEY)) ?? false;
+}
+
 function filterLabel(filter: TaskFilter): string {
 	switch (filter) {
 		case "pending":
@@ -909,6 +1153,32 @@ function filterDescription(filter: TaskFilter): string {
 		default:
 			return "all";
 	}
+}
+
+function getTodayDateString(): string {
+	return formatDate(new Date());
+}
+
+function getTomorrowDateString(): string {
+	const tomorrow = new Date();
+	tomorrow.setDate(tomorrow.getDate() + 1);
+	return formatDate(tomorrow);
+}
+
+function isDeferred(deferredUntil: string | null, today: string): boolean {
+	return deferredUntil !== null && deferredUntil > today;
+}
+
+function isFutureDate(date: string): boolean {
+	return DATE_PATTERN.test(date) && date >= getTomorrowDateString();
+}
+
+function isHiddenFromTaskListFrontmatter(frontmatter: Record<string, unknown> | null | undefined): boolean {
+	if (!frontmatter) {
+		return false;
+	}
+
+	return normalizeFrontmatterBoolean(frontmatter[HIDDEN_FROM_TASKS_KEY]) ?? false;
 }
 
 function findTaskLine(lines: string[], task: TaskItem): number | null {
@@ -968,6 +1238,24 @@ function setTaskCompletion(rawLine: string, completed: boolean): string | null {
 	return `${match[1]}${completed ? "x" : " "}${match[3]}`;
 }
 
+function updateAllTasksInEditor(editor: Editor, completed: boolean): number {
+	let updatedCount = 0;
+
+	for (let index = 0; index < editor.lineCount(); index += 1) {
+		const rawLine = editor.getLine(index);
+		const nextLine = setTaskCompletion(rawLine, completed);
+
+		if (nextLine === null || nextLine === rawLine) {
+			continue;
+		}
+
+		editor.setLine(index, nextLine);
+		updatedCount += 1;
+	}
+
+	return updatedCount;
+}
+
 function updateTaskInContent(content: string, task: TaskItem, completed: boolean): string {
 	const newline = content.includes("\r\n") ? "\r\n" : "\n";
 	const lines = content.split(/\r?\n/);
@@ -984,4 +1272,91 @@ function updateTaskInContent(content: string, task: TaskItem, completed: boolean
 
 	lines[targetLine] = nextLine;
 	return lines.join(newline);
+}
+
+function updateAllTasksInContent(
+	content: string,
+	completed: boolean,
+): { content: string; updatedCount: number } {
+	const newline = content.includes("\r\n") ? "\r\n" : "\n";
+	const lines = content.split(/\r?\n/);
+	let updatedCount = 0;
+
+	for (let index = 0; index < lines.length; index += 1) {
+		const rawLine = lines[index];
+		const nextLine = setTaskCompletion(rawLine, completed);
+
+		if (nextLine === null || nextLine === rawLine) {
+			continue;
+		}
+
+		lines[index] = nextLine;
+		updatedCount += 1;
+	}
+
+	return {
+		content: lines.join(newline),
+		updatedCount,
+	};
+}
+
+const DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
+
+function formatDate(date: Date): string {
+	const year = String(date.getFullYear());
+	const month = String(date.getMonth() + 1).padStart(2, "0");
+	const day = String(date.getDate()).padStart(2, "0");
+	return `${year}-${month}-${day}`;
+}
+
+function normalizeDeferredUntil(value: string | null): string | null {
+	const unquotedValue = unquoteFrontmatterValue(value);
+
+	return DATE_PATTERN.test(unquotedValue) ? unquotedValue : null;
+}
+
+function extractFrontmatterValue(content: string, key: string): string | null {
+	const frontmatterMatch = content.match(FRONTMATTER_PATTERN);
+	if (!frontmatterMatch) {
+		return null;
+	}
+
+	const frontmatter = frontmatterMatch[1];
+	const valueMatch = frontmatter.match(new RegExp(`^${key}:\\s*(.+?)\\s*$`, "m"));
+	return valueMatch ? valueMatch[1] : null;
+}
+
+function normalizeFrontmatterBoolean(value: unknown): boolean | null {
+	if (typeof value === "boolean") {
+		return value;
+	}
+
+	if (typeof value !== "string") {
+		return null;
+	}
+
+	switch (unquoteFrontmatterValue(value).toLowerCase()) {
+		case "true":
+		case "yes":
+		case "on":
+			return true;
+		case "false":
+		case "no":
+		case "off":
+			return false;
+		default:
+			return null;
+	}
+}
+
+function unquoteFrontmatterValue(value: string | null): string {
+	if (value === null) {
+		return "";
+	}
+
+	const trimmedValue = value.trim();
+	return (trimmedValue.startsWith('"') && trimmedValue.endsWith('"')) ||
+		(trimmedValue.startsWith("'") && trimmedValue.endsWith("'"))
+		? trimmedValue.slice(1, -1)
+		: trimmedValue;
 }
