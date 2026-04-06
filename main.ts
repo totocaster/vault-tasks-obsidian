@@ -70,6 +70,18 @@ interface TaskSnapshot {
 	showConnections: boolean;
 }
 
+interface ViewScrollAnchor {
+	key: string;
+	offset: number;
+	type: "group" | "section" | "task";
+}
+
+interface ViewScrollState {
+	fallbackAnchor: ViewScrollAnchor | null;
+	primaryAnchor: ViewScrollAnchor | null;
+	scrollTop: number;
+}
+
 export default class VaultTasksPlugin extends Plugin {
 	private autoRefreshPaused = false;
 	private filter: TaskFilter = "pending";
@@ -714,6 +726,7 @@ class VaultTasksView extends ItemView {
 	}
 
 	async render(): Promise<void> {
+		const scrollState = this.captureScrollState();
 		const snapshot = this.plugin.getSnapshot();
 		const { markdown, renderedGroups, renderedSections, renderedTasks } = buildRenderedDocument(
 			snapshot,
@@ -765,6 +778,8 @@ class VaultTasksView extends ItemView {
 			this.renderedTasks.set(task.key, task);
 			const listItemEl = checkbox.closest("li");
 			listItemEl?.setAttr("data-task-key", task.key);
+			listItemEl?.setAttr("data-scroll-anchor-kind", "task");
+			listItemEl?.setAttr("data-scroll-anchor-key", task.key);
 			this.addJumpButton(checkbox, task);
 		}
 
@@ -777,6 +792,8 @@ class VaultTasksView extends ItemView {
 				continue;
 			}
 
+			headingEl.setAttr("data-scroll-anchor-kind", "group");
+			headingEl.setAttr("data-scroll-anchor-key", group.file.path);
 			this.bindHeadingMenu(headingEl, group);
 			this.decorateHeadingContext(headingEl);
 		}
@@ -790,8 +807,12 @@ class VaultTasksView extends ItemView {
 				continue;
 			}
 
+			headingEl.setAttr("data-scroll-anchor-kind", "section");
+			headingEl.setAttr("data-scroll-anchor-key", this.getSectionAnchorKey(section));
 			this.bindSectionMenu(headingEl, section);
 		}
+
+		this.restoreScrollState(scrollState);
 	}
 
 	updateHeaderControls(): void {
@@ -928,6 +949,113 @@ class VaultTasksView extends ItemView {
 
 		this.connectionsButtonEl.toggleClass("is-active", showConnections);
 		this.connectionsButtonEl.setAttr("aria-pressed", showConnections ? "true" : "false");
+	}
+
+	private captureScrollState(): ViewScrollState {
+		const scrollTop = this.contentEl.scrollTop;
+		const anchorEls = Array.from(
+			this.contentEl.querySelectorAll<HTMLElement>(
+				"[data-scroll-anchor-kind][data-scroll-anchor-key]",
+			),
+		);
+
+		if (anchorEls.length === 0) {
+			return {
+				fallbackAnchor: null,
+				primaryAnchor: null,
+				scrollTop,
+			};
+		}
+
+		const viewportTop = this.contentEl.getBoundingClientRect().top;
+		let primaryIndex = anchorEls.findIndex(
+			(anchorEl) => anchorEl.getBoundingClientRect().bottom > viewportTop,
+		);
+
+		if (primaryIndex === -1) {
+			primaryIndex = anchorEls.length - 1;
+		}
+
+		return {
+			fallbackAnchor:
+				primaryIndex > 0
+					? this.buildScrollAnchor(anchorEls[primaryIndex - 1], viewportTop)
+					: null,
+			primaryAnchor: this.buildScrollAnchor(anchorEls[primaryIndex], viewportTop),
+			scrollTop,
+		};
+	}
+
+	private buildScrollAnchor(
+		anchorEl: HTMLElement,
+		viewportTop: number,
+	): ViewScrollAnchor | null {
+		const type = anchorEl.getAttribute("data-scroll-anchor-kind");
+		const key = anchorEl.getAttribute("data-scroll-anchor-key");
+
+		if (
+			!key ||
+			(type !== "group" && type !== "section" && type !== "task")
+		) {
+			return null;
+		}
+
+		return {
+			key,
+			offset: anchorEl.getBoundingClientRect().top - viewportTop,
+			type,
+		};
+	}
+
+	private restoreScrollState(scrollState: ViewScrollState): void {
+		const anchor =
+			scrollState.primaryAnchor &&
+			this.findScrollAnchorElement(scrollState.primaryAnchor)
+				? scrollState.primaryAnchor
+				: scrollState.fallbackAnchor &&
+					  this.findScrollAnchorElement(scrollState.fallbackAnchor)
+					? scrollState.fallbackAnchor
+					: null;
+
+		if (!anchor) {
+			this.contentEl.scrollTop = this.clampScrollTop(scrollState.scrollTop);
+			return;
+		}
+
+		const anchorEl = this.findScrollAnchorElement(anchor);
+		if (!anchorEl) {
+			this.contentEl.scrollTop = this.clampScrollTop(scrollState.scrollTop);
+			return;
+		}
+
+		const viewportTop = this.contentEl.getBoundingClientRect().top;
+		const currentOffset = anchorEl.getBoundingClientRect().top - viewportTop;
+		this.contentEl.scrollTop = this.clampScrollTop(
+			this.contentEl.scrollTop + currentOffset - anchor.offset,
+		);
+	}
+
+	private findScrollAnchorElement(anchor: ViewScrollAnchor): HTMLElement | null {
+		return (
+			Array.from(
+				this.contentEl.querySelectorAll<HTMLElement>(
+					"[data-scroll-anchor-kind][data-scroll-anchor-key]",
+				),
+			).find(
+				(anchorEl) =>
+					anchorEl.getAttribute("data-scroll-anchor-kind") === anchor.type &&
+					anchorEl.getAttribute("data-scroll-anchor-key") === anchor.key,
+			) ?? null
+		);
+	}
+
+	private clampScrollTop(scrollTop: number): number {
+		const maxScrollTop = Math.max(0, this.contentEl.scrollHeight - this.contentEl.clientHeight);
+		return Math.max(0, Math.min(maxScrollTop, scrollTop));
+	}
+
+	private getSectionAnchorKey(section: TaskSectionGroup): string {
+		return `${section.file.path}:${section.line}`;
 	}
 
 	private addJumpButton(checkboxEl: HTMLInputElement, task: TaskItem): void {
