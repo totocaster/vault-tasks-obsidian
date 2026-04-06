@@ -1,0 +1,10 @@
+{
+	"id": "vault-tasks-view",
+	"name": "Vault Tasks",
+	"version": "0.1.0",
+	"minAppVersion": "1.7.2",
+	"description": "Collects Markdown tasks from every note into a grouped sidebar view.",
+	"author": "Toto Tvalavadze",
+	"authorUrl": "https://totocaster.com",
+	"isDesktopOnly": false
+}

@@ -1,0 +1,76 @@
+.vault-tasks-view {
+	overflow-y: auto;
+}
+
+.vault-tasks-view__document {
+	padding: var(--file-margins);
+}
+
+.vault-tasks-view__sizer {
+	width: 100%;
+	margin: 0 auto;
+}
+
+.vault-tasks-view.is-readable-line-width .vault-tasks-view__sizer,
+.vault-tasks-view__document.is-readable-line-width .vault-tasks-view__sizer {
+	max-width: var(--line-width) !important;
+	margin-inline: auto !important;
+}
+
+.vault-tasks-view__header-filters {
+	display: flex;
+	align-items: center;
+	gap: var(--size-4-1);
+	margin-inline-end: var(--size-4-2);
+}
+
+.vault-tasks-view__header-filter {
+	color: var(--icon-color);
+}
+
+.vault-tasks-view__header-filter.is-active,
+.vault-tasks-view__header-filter[aria-pressed="true"] {
+	background: var(--background-modifier-hover);
+	color: var(--icon-color-active);
+}
+
+.vault-tasks-view__header-filter:focus-visible {
+	outline: 2px solid var(--background-modifier-border-focus);
+	outline-offset: 2px;
+}
+
+.vault-tasks-view__task-jump {
+	display: inline;
+	margin: 0 0 0 var(--size-4-1);
+	padding: 0;
+	border: 0 !important;
+	border-radius: 0 !important;
+	background: none !important;
+	box-shadow: none !important;
+	color: var(--text-faint) !important;
+	opacity: 0;
+	font: inherit;
+	font-size: 0.9em;
+	font-weight: var(--font-normal);
+	line-height: inherit;
+	vertical-align: baseline;
+	cursor: pointer;
+	text-decoration: none;
+	transition: opacity 120ms ease, color 120ms ease;
+	pointer-events: none;
+}
+
+.vault-tasks-view li:hover .vault-tasks-view__task-jump,
+.vault-tasks-view li:focus-within .vault-tasks-view__task-jump {
+	opacity: 1;
+	pointer-events: auto;
+}
+
+.vault-tasks-view__task-jump:hover {
+	color: var(--text-muted) !important;
+}
+
+.vault-tasks-view__task-jump:focus-visible {
+	outline: none;
+	text-decoration: underline;
+}
