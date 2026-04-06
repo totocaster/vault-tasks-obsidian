@@ -1,7 +1,7 @@
 {
 	"name": "vault-tasks-view",
 	"version": "0.1.0",
-	"description": "Collects Markdown tasks from every note into a grouped sidebar view.",
+	"description": "Collects Markdown tasks from every note into a grouped task view.",
 	"main": "main.js",
 	"scripts": {
 		"dev": "node esbuild.config.mjs",

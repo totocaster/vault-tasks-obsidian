@@ -3,7 +3,7 @@
   "name": "Vault Tasks",
   "version": "0.1.0",
   "minAppVersion": "1.7.2",
-  "description": "Collects Markdown tasks from every note into a grouped sidebar view.",
+  "description": "Collects Markdown tasks from every note into a grouped task view.",
   "author": "Toto Tvalavadze",
   "authorUrl": "https://ttvl.co",
   "isDesktopOnly": false
