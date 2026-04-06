@@ -43,6 +43,7 @@ interface TaskSnapshot {
 	filter: TaskFilter;
 	groups: TaskGroup[];
 	refreshing: boolean;
+	showConnections: boolean;
 }
 
 export default class VaultTasksPlugin extends Plugin {
@@ -53,6 +54,7 @@ export default class VaultTasksPlugin extends Plugin {
 	private manualRefreshRequired = false;
 	private queuedRefresh = false;
 	private refreshing = false;
+	private showConnections = false;
 	private readonly scheduleRefresh = debounce(() => {
 		void this.refreshIndex();
 	}, 250, true);
@@ -143,7 +145,12 @@ export default class VaultTasksPlugin extends Plugin {
 			filter: this.filter,
 			groups: this.groups,
 			refreshing: this.refreshing,
+			showConnections: this.showConnections,
 		};
+	}
+
+	getShowConnections(): boolean {
+		return this.showConnections;
 	}
 
 	getReadableLineLengthEnabled(): boolean {
@@ -171,6 +178,16 @@ export default class VaultTasksPlugin extends Plugin {
 		}
 
 		this.filter = filter;
+		await this.renderAllViews();
+	}
+
+	async setShowConnections(showConnections: boolean): Promise<void> {
+		if (this.showConnections === showConnections) {
+			return;
+		}
+
+		this.showConnections = showConnections;
+		await this.updateHeaderControls();
 		await this.renderAllViews();
 	}
 
@@ -320,6 +337,27 @@ export default class VaultTasksPlugin extends Plugin {
 		return file instanceof TFile && file.extension === "md";
 	}
 
+	getBacklinkFiles(file: TFile): TFile[] {
+		const backlinks = new Map<string, TFile>();
+		const resolvedLinks = this.app.metadataCache.resolvedLinks;
+
+		for (const [sourcePath, links] of Object.entries(resolvedLinks)) {
+			if (sourcePath === file.path || !links[file.path]) {
+				continue;
+			}
+
+			const sourceFile = this.app.vault.getAbstractFileByPath(sourcePath);
+			if (sourceFile instanceof TFile && sourceFile.extension === "md") {
+				backlinks.set(sourceFile.path, sourceFile);
+			}
+		}
+
+		return Array.from(backlinks.values()).sort(
+			(left, right) =>
+				left.basename.localeCompare(right.basename) || left.path.localeCompare(right.path),
+		);
+	}
+
 	private getPreferredNoteLeaf(): WorkspaceLeaf {
 		const leaf = this.app.workspace.getMostRecentLeaf(this.app.workspace.rootSplit);
 
@@ -379,6 +417,7 @@ export default class VaultTasksPlugin extends Plugin {
 
 class VaultTasksView extends ItemView {
 	private archiveButtonEl: HTMLButtonElement | null = null;
+	private connectionsButtonEl: HTMLButtonElement | null = null;
 	private filterButtons = new Map<TaskFilter, HTMLButtonElement>();
 	private headerFilterEl: HTMLDivElement | null = null;
 	private markdownHostEl: HTMLDivElement | null = null;
@@ -465,6 +504,7 @@ class VaultTasksView extends ItemView {
 
 	async onClose(): Promise<void> {
 		this.archiveButtonEl = null;
+		this.connectionsButtonEl = null;
 		this.headerFilterEl?.remove();
 		this.headerFilterEl = null;
 		this.filterButtons.clear();
@@ -477,7 +517,11 @@ class VaultTasksView extends ItemView {
 
 	async render(): Promise<void> {
 		const snapshot = this.plugin.getSnapshot();
-		const { markdown, renderedTasks } = buildRenderedDocument(snapshot, this.app.metadataCache);
+		const { markdown, renderedTasks } = buildRenderedDocument(
+			snapshot,
+			this.app.metadataCache,
+			(file) => this.plugin.getBacklinkFiles(file),
+		);
 
 		this.ensureHeaderFilters();
 		this.updateFilterButtons(snapshot.filter);
@@ -523,11 +567,20 @@ class VaultTasksView extends ItemView {
 			this.renderedTasks.set(task.key, task);
 			this.addJumpButton(checkbox, task);
 		}
+
+		if (snapshot.showConnections) {
+			const headings = Array.from(sizerEl.querySelectorAll<HTMLHeadingElement>("h2"));
+
+			for (const headingEl of headings) {
+				this.decorateConnectionsContext(headingEl);
+			}
+		}
 	}
 
 	updateHeaderControls(): void {
 		this.ensureHeaderFilters();
 		this.updateArchiveButton();
+		this.updateConnectionsButton();
 		this.updateFilterButtons(this.plugin.getFilter());
 	}
 
@@ -582,6 +635,23 @@ class VaultTasksView extends ItemView {
 
 		this.archiveButtonEl = archiveButtonEl;
 
+		const connectionsButtonEl = filterEl.createEl("button", {
+			cls: ["clickable-icon", "view-action", "vault-tasks-view__header-filter"],
+			attr: {
+				"data-tooltip-position": "bottom",
+				"aria-label": "Toggle connections context",
+				title: "Toggle connections context",
+				type: "button",
+			},
+		});
+		setIcon(connectionsButtonEl, "waypoints");
+
+		this.registerDomEvent(connectionsButtonEl, "click", () => {
+			void this.plugin.setShowConnections(!this.plugin.getShowConnections());
+		});
+
+		this.connectionsButtonEl = connectionsButtonEl;
+
 		const anchorEl = actionsEl.lastElementChild;
 		if (anchorEl) {
 			actionsEl.insertBefore(filterEl, anchorEl);
@@ -609,6 +679,17 @@ class VaultTasksView extends ItemView {
 
 		this.archiveButtonEl.toggleClass("is-active", hasPendingRefresh);
 		this.archiveButtonEl.setAttr("aria-pressed", hasPendingRefresh ? "true" : "false");
+	}
+
+	private updateConnectionsButton(): void {
+		if (!this.connectionsButtonEl) {
+			return;
+		}
+
+		const showConnections = this.plugin.getShowConnections();
+
+		this.connectionsButtonEl.toggleClass("is-active", showConnections);
+		this.connectionsButtonEl.setAttr("aria-pressed", showConnections ? "true" : "false");
 	}
 
 	private addJumpButton(checkboxEl: HTMLInputElement, task: TaskItem): void {
@@ -647,13 +728,51 @@ class VaultTasksView extends ItemView {
 
 		listItemEl.appendChild(jumpButtonEl);
 	}
+
+	private decorateConnectionsContext(headingEl: HTMLHeadingElement): void {
+		const headingBlockEl = headingEl.closest(".el-h2") ?? headingEl;
+		const nextBlockEl = headingBlockEl.nextElementSibling;
+
+		if (!nextBlockEl) {
+			return;
+		}
+
+		const paragraphEl =
+			nextBlockEl instanceof HTMLParagraphElement
+				? nextBlockEl
+				: nextBlockEl.querySelector(":scope > p");
+
+		if (!(paragraphEl instanceof HTMLParagraphElement)) {
+			return;
+		}
+
+		if (!paragraphEl.textContent?.trim().startsWith("Related to:")) {
+			return;
+		}
+
+		paragraphEl.addClass("vault-tasks-view__connections");
+
+		const labelEl = paragraphEl.querySelector("span");
+		if (labelEl instanceof HTMLSpanElement) {
+			labelEl.addClass("vault-tasks-view__connections-label");
+		}
+
+		const linkEls = Array.from(
+			paragraphEl.querySelectorAll<HTMLAnchorElement>("a.internal-link"),
+		);
+		for (const linkEl of linkEls) {
+			linkEl.addClass("vault-tasks-view__connections-link");
+		}
+	}
 }
 
 function buildRenderedDocument(
 	snapshot: TaskSnapshot,
 	metadataCache: VaultTasksPlugin["app"]["metadataCache"],
-): { markdown: string; renderedTasks: TaskItem[] } {
+	getBacklinkFiles: (file: TFile) => TFile[],
+): { markdown: string; renderedGroups: TaskGroup[]; renderedTasks: TaskItem[] } {
 	const sections: string[] = [];
+	const renderedGroups: TaskGroup[] = [];
 	const renderedTasks: TaskItem[] = [];
 
 	for (const group of snapshot.groups) {
@@ -667,6 +786,15 @@ function buildRenderedDocument(
 		const noteTitle = escapeWikiLinkText(group.noteTitle);
 
 		sections.push(`## [[${linkText}|${noteTitle}]]`);
+		renderedGroups.push(group);
+
+		if (snapshot.showConnections) {
+			const backlinks = getBacklinkFiles(group.file);
+
+			if (backlinks.length > 0) {
+				sections.push(buildConnectionsLine(backlinks, metadataCache));
+			}
+		}
 
 		for (const task of visibleTasks) {
 			sections.push(task.renderedLine);
@@ -683,14 +811,28 @@ function buildRenderedDocument(
 
 		return {
 			markdown: emptyMessage,
+			renderedGroups,
 			renderedTasks,
 		};
 	}
 
 	return {
 		markdown: sections.join("\n").trim(),
+		renderedGroups,
 		renderedTasks,
 	};
+}
+
+function buildConnectionsLine(
+	backlinks: TFile[],
+	metadataCache: VaultTasksPlugin["app"]["metadataCache"],
+): string {
+	const renderedLinks = backlinks.map((backlinkFile) => {
+		const linkText = escapeWikiLinkText(metadataCache.fileToLinktext(backlinkFile, "/", true));
+		return `[[${linkText}]]`;
+	});
+
+	return `<span class="vault-tasks-view__connections-label">Related to:</span> ${renderedLinks.join(", ")}`;
 }
 
 function buildTaskItem(file: TFile, taskItem: ListItemCache, lines: string[]): TaskItem | null {

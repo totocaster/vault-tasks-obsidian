@@ -74,3 +74,29 @@
 	outline: none;
 	text-decoration: underline;
 }
+
+.vault-tasks-view__connections {
+	margin-block-start: calc(var(--size-4-1) * -0.5);
+	margin-block-end: var(--size-4-2);
+	margin-inline-end: 0;
+	margin-inline-start: 0 !important;
+	padding-inline-start: 0 !important;
+	text-indent: 0;
+	color: var(--text-muted);
+	font-size: var(--font-ui-small);
+	font-weight: var(--font-normal);
+	line-height: inherit;
+}
+
+.vault-tasks-view__connections-label {
+	color: var(--text-faint);
+}
+
+.vault-tasks-view__connections-link {
+	color: var(--text-muted);
+	text-decoration: none;
+}
+
+.vault-tasks-view__connections-link:hover {
+	color: var(--text-accent);
+}

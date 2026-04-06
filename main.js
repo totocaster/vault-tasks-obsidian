@@ -43,6 +43,7 @@ var VaultTasksPlugin = class extends import_obsidian.Plugin {
     this.manualRefreshRequired = false;
     this.queuedRefresh = false;
     this.refreshing = false;
+    this.showConnections = false;
     this.scheduleRefresh = (0, import_obsidian.debounce)(() => {
       void this.refreshIndex();
     }, 250, true);
@@ -120,8 +121,12 @@ var VaultTasksPlugin = class extends import_obsidian.Plugin {
       error: this.lastError,
       filter: this.filter,
       groups: this.groups,
-      refreshing: this.refreshing
+      refreshing: this.refreshing,
+      showConnections: this.showConnections
     };
+  }
+  getShowConnections() {
+    return this.showConnections;
   }
   getReadableLineLengthEnabled() {
     var _a;
@@ -142,6 +147,14 @@ var VaultTasksPlugin = class extends import_obsidian.Plugin {
       return;
     }
     this.filter = filter;
+    await this.renderAllViews();
+  }
+  async setShowConnections(showConnections) {
+    if (this.showConnections === showConnections) {
+      return;
+    }
+    this.showConnections = showConnections;
+    await this.updateHeaderControls();
     await this.renderAllViews();
   }
   async activateView() {
@@ -262,6 +275,22 @@ var VaultTasksPlugin = class extends import_obsidian.Plugin {
   isMarkdownFile(file) {
     return file instanceof import_obsidian.TFile && file.extension === "md";
   }
+  getBacklinkFiles(file) {
+    const backlinks = /* @__PURE__ */ new Map();
+    const resolvedLinks = this.app.metadataCache.resolvedLinks;
+    for (const [sourcePath, links] of Object.entries(resolvedLinks)) {
+      if (sourcePath === file.path || !links[file.path]) {
+        continue;
+      }
+      const sourceFile = this.app.vault.getAbstractFileByPath(sourcePath);
+      if (sourceFile instanceof import_obsidian.TFile && sourceFile.extension === "md") {
+        backlinks.set(sourceFile.path, sourceFile);
+      }
+    }
+    return Array.from(backlinks.values()).sort(
+      (left, right) => left.basename.localeCompare(right.basename) || left.path.localeCompare(right.path)
+    );
+  }
   getPreferredNoteLeaf() {
     const leaf = this.app.workspace.getMostRecentLeaf(this.app.workspace.rootSplit);
     if (leaf && leaf.view.getViewType() !== VIEW_TYPE_TASKS) {
@@ -311,6 +340,7 @@ var VaultTasksView = class extends import_obsidian.ItemView {
     super(leaf);
     this.plugin = plugin;
     this.archiveButtonEl = null;
+    this.connectionsButtonEl = null;
     this.filterButtons = /* @__PURE__ */ new Map();
     this.headerFilterEl = null;
     this.markdownHostEl = null;
@@ -375,6 +405,7 @@ var VaultTasksView = class extends import_obsidian.ItemView {
   async onClose() {
     var _a, _b;
     this.archiveButtonEl = null;
+    this.connectionsButtonEl = null;
     (_a = this.headerFilterEl) == null ? void 0 : _a.remove();
     this.headerFilterEl = null;
     this.filterButtons.clear();
@@ -387,7 +418,11 @@ var VaultTasksView = class extends import_obsidian.ItemView {
   async render() {
     var _a;
     const snapshot = this.plugin.getSnapshot();
-    const { markdown, renderedTasks } = buildRenderedDocument(snapshot, this.app.metadataCache);
+    const { markdown, renderedTasks } = buildRenderedDocument(
+      snapshot,
+      this.app.metadataCache,
+      (file) => this.plugin.getBacklinkFiles(file)
+    );
     this.ensureHeaderFilters();
     this.updateFilterButtons(snapshot.filter);
     (_a = this.renderComponent) == null ? void 0 : _a.unload();
@@ -425,10 +460,17 @@ var VaultTasksView = class extends import_obsidian.ItemView {
       this.renderedTasks.set(task.key, task);
       this.addJumpButton(checkbox, task);
     }
+    if (snapshot.showConnections) {
+      const headings = Array.from(sizerEl.querySelectorAll("h2"));
+      for (const headingEl of headings) {
+        this.decorateConnectionsContext(headingEl);
+      }
+    }
   }
   updateHeaderControls() {
     this.ensureHeaderFilters();
     this.updateArchiveButton();
+    this.updateConnectionsButton();
     this.updateFilterButtons(this.plugin.getFilter());
   }
   ensureHeaderFilters() {
@@ -471,6 +513,20 @@ var VaultTasksView = class extends import_obsidian.ItemView {
       void this.plugin.applyTaskChanges();
     });
     this.archiveButtonEl = archiveButtonEl;
+    const connectionsButtonEl = filterEl.createEl("button", {
+      cls: ["clickable-icon", "view-action", "vault-tasks-view__header-filter"],
+      attr: {
+        "data-tooltip-position": "bottom",
+        "aria-label": "Toggle connections context",
+        title: "Toggle connections context",
+        type: "button"
+      }
+    });
+    (0, import_obsidian.setIcon)(connectionsButtonEl, "waypoints");
+    this.registerDomEvent(connectionsButtonEl, "click", () => {
+      void this.plugin.setShowConnections(!this.plugin.getShowConnections());
+    });
+    this.connectionsButtonEl = connectionsButtonEl;
     const anchorEl = actionsEl.lastElementChild;
     if (anchorEl) {
       actionsEl.insertBefore(filterEl, anchorEl);
@@ -493,6 +549,14 @@ var VaultTasksView = class extends import_obsidian.ItemView {
     const hasPendingRefresh = this.plugin.hasPendingManualRefresh();
     this.archiveButtonEl.toggleClass("is-active", hasPendingRefresh);
     this.archiveButtonEl.setAttr("aria-pressed", hasPendingRefresh ? "true" : "false");
+  }
+  updateConnectionsButton() {
+    if (!this.connectionsButtonEl) {
+      return;
+    }
+    const showConnections = this.plugin.getShowConnections();
+    this.connectionsButtonEl.toggleClass("is-active", showConnections);
+    this.connectionsButtonEl.setAttr("aria-pressed", showConnections ? "true" : "false");
   }
   addJumpButton(checkboxEl, task) {
     const listItemEl = checkboxEl.closest("li");
@@ -525,10 +589,37 @@ var VaultTasksView = class extends import_obsidian.ItemView {
     });
     listItemEl.appendChild(jumpButtonEl);
   }
+  decorateConnectionsContext(headingEl) {
+    var _a, _b;
+    const headingBlockEl = (_a = headingEl.closest(".el-h2")) != null ? _a : headingEl;
+    const nextBlockEl = headingBlockEl.nextElementSibling;
+    if (!nextBlockEl) {
+      return;
+    }
+    const paragraphEl = nextBlockEl instanceof HTMLParagraphElement ? nextBlockEl : nextBlockEl.querySelector(":scope > p");
+    if (!(paragraphEl instanceof HTMLParagraphElement)) {
+      return;
+    }
+    if (!((_b = paragraphEl.textContent) == null ? void 0 : _b.trim().startsWith("Related to:"))) {
+      return;
+    }
+    paragraphEl.addClass("vault-tasks-view__connections");
+    const labelEl = paragraphEl.querySelector("span");
+    if (labelEl instanceof HTMLSpanElement) {
+      labelEl.addClass("vault-tasks-view__connections-label");
+    }
+    const linkEls = Array.from(
+      paragraphEl.querySelectorAll("a.internal-link")
+    );
+    for (const linkEl of linkEls) {
+      linkEl.addClass("vault-tasks-view__connections-link");
+    }
+  }
 };
-function buildRenderedDocument(snapshot, metadataCache) {
+function buildRenderedDocument(snapshot, metadataCache, getBacklinkFiles) {
   var _a;
   const sections = [];
+  const renderedGroups = [];
   const renderedTasks = [];
   for (const group of snapshot.groups) {
     const visibleTasks = group.tasks.filter((task) => matchesFilter(task, snapshot.filter));
@@ -538,6 +629,13 @@ function buildRenderedDocument(snapshot, metadataCache) {
     const linkText = escapeWikiLinkText(metadataCache.fileToLinktext(group.file, "/", true));
     const noteTitle = escapeWikiLinkText(group.noteTitle);
     sections.push(`## [[${linkText}|${noteTitle}]]`);
+    renderedGroups.push(group);
+    if (snapshot.showConnections) {
+      const backlinks = getBacklinkFiles(group.file);
+      if (backlinks.length > 0) {
+        sections.push(buildConnectionsLine(backlinks, metadataCache));
+      }
+    }
     for (const task of visibleTasks) {
       sections.push(task.renderedLine);
       renderedTasks.push(task);
@@ -548,13 +646,22 @@ function buildRenderedDocument(snapshot, metadataCache) {
     const emptyMessage = (_a = snapshot.error) != null ? _a : snapshot.filter === "all" ? "No tasks." : `No ${filterDescription(snapshot.filter)} tasks.`;
     return {
       markdown: emptyMessage,
+      renderedGroups,
       renderedTasks
     };
   }
   return {
     markdown: sections.join("\n").trim(),
+    renderedGroups,
     renderedTasks
   };
+}
+function buildConnectionsLine(backlinks, metadataCache) {
+  const renderedLinks = backlinks.map((backlinkFile) => {
+    const linkText = escapeWikiLinkText(metadataCache.fileToLinktext(backlinkFile, "/", true));
+    return `[[${linkText}]]`;
+  });
+  return `<span class="vault-tasks-view__connections-label">Related to:</span> ${renderedLinks.join(", ")}`;
 }
 function buildTaskItem(file, taskItem, lines) {
   const line = taskItem.position.start.line;
