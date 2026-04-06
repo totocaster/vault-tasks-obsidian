@@ -3,6 +3,7 @@ import {
 	Component,
 	debounce,
 	Editor,
+	HeadingCache,
 	ItemView,
 	Keymap,
 	ListItemCache,
@@ -22,6 +23,11 @@ const VIEW_TYPE_TASKS = "vault-tasks-view";
 const VIEW_TITLE = "Vault tasks";
 const DEFERRED_UNTIL_KEY = "deffered-until";
 const HIDDEN_FROM_TASKS_KEY = "hide-from-vault-tasks";
+const TASK_STATUS_CANCELLED = "-";
+const TASK_STATUS_DEFERRED = ">";
+const TASK_STATUS_DONE = "x";
+const TASK_STATUS_IN_PROGRESS = "/";
+const TASK_STATUS_TODO = " ";
 const FRONTMATTER_PATTERN = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/;
 const TASK_LINE_PATTERN = /^(\s*(?:[-*+]|\d+[.)])\s+\[)(.)(\].*)$/;
 const TASK_TEXT_PATTERN = /^\s*(?:[-*+]|\d+[.)])\s+\[.\]\s?(.*)$/;
@@ -35,6 +41,9 @@ interface TaskItem {
 	line: number;
 	rawLine: string;
 	renderedLine: string;
+	sectionHeading: string | null;
+	sectionLine: number | null;
+	statusSymbol: string;
 	text: string;
 }
 
@@ -43,6 +52,13 @@ interface TaskGroup {
 	file: TFile;
 	hiddenFromTaskList: boolean;
 	noteTitle: string;
+	tasks: TaskItem[];
+}
+
+interface TaskSectionGroup {
+	file: TFile;
+	heading: string;
+	line: number;
 	tasks: TaskItem[];
 }
 
@@ -214,10 +230,24 @@ export default class VaultTasksPlugin extends Plugin {
 		await this.app.workspace.revealLeaf(leaf);
 	}
 
-	async openTask(task: TaskItem): Promise<void> {
+	async copyToClipboard(text: string, successMessage: string): Promise<void> {
+		try {
+			await window.navigator.clipboard.writeText(text);
+			new Notice(successMessage);
+		} catch (error) {
+			const message = error instanceof Error ? error.message : "Could not copy to the clipboard.";
+			new Notice(message);
+		}
+	}
+
+	async openNote(file: TFile): Promise<void> {
 		const leaf = this.getPreferredNoteLeaf();
-		await leaf.openFile(task.file);
+		await leaf.openFile(file);
 		this.app.workspace.setActiveLeaf(leaf, { focus: true });
+	}
+
+	async openTask(task: TaskItem): Promise<void> {
+		await this.openNote(task.file);
 
 		const view = this.app.workspace.getActiveViewOfType(MarkdownView);
 		if (!view || view.file?.path !== task.file.path) {
@@ -234,6 +264,41 @@ export default class VaultTasksPlugin extends Plugin {
 			true,
 		);
 		view.editor.focus();
+	}
+
+	async setTaskStatus(task: TaskItem, statusSymbol: string): Promise<boolean> {
+		try {
+			this.autoRefreshPaused = true;
+			const activeView = this.app.workspace.getActiveViewOfType(MarkdownView);
+
+			if (activeView?.file?.path === task.file.path) {
+				this.setTaskStatusInEditor(activeView.editor, task, statusSymbol);
+			} else {
+				await this.app.vault.process(task.file, (content) => {
+					return updateTaskStatusInContent(content, task, statusSymbol);
+				});
+			}
+
+			const nextLine = setTaskStatusSymbol(task.rawLine, statusSymbol);
+			if (nextLine !== null) {
+				task.completed = isCompletedTaskStatus(statusSymbol);
+				task.rawLine = nextLine;
+				task.renderedLine = nextLine.trimStart();
+				task.statusSymbol = statusSymbol;
+			}
+
+			this.manualRefreshRequired = true;
+			await this.updateHeaderControls();
+			return true;
+		} catch (error) {
+			const message = error instanceof Error ? error.message : "Could not update the task.";
+			new Notice(message);
+			if (!this.manualRefreshRequired) {
+				this.autoRefreshPaused = false;
+			}
+			await this.updateHeaderControls();
+			return false;
+		}
 	}
 
 	async refreshIndex(): Promise<void> {
@@ -262,37 +327,7 @@ export default class VaultTasksPlugin extends Plugin {
 	}
 
 	async toggleTask(task: TaskItem, completed: boolean): Promise<boolean> {
-		try {
-			this.autoRefreshPaused = true;
-			const activeView = this.app.workspace.getActiveViewOfType(MarkdownView);
-
-			if (activeView?.file?.path === task.file.path) {
-				this.toggleTaskInEditor(activeView.editor, task, completed);
-			} else {
-				await this.app.vault.process(task.file, (content) => {
-					return updateTaskInContent(content, task, completed);
-				});
-			}
-
-			const nextLine = setTaskCompletion(task.rawLine, completed);
-			if (nextLine !== null) {
-				task.completed = completed;
-				task.rawLine = nextLine;
-				task.renderedLine = nextLine.trimStart();
-			}
-
-			this.manualRefreshRequired = true;
-			await this.updateHeaderControls();
-			return true;
-		} catch (error) {
-			const message = error instanceof Error ? error.message : "Could not update the task.";
-			new Notice(message);
-			if (!this.manualRefreshRequired) {
-				this.autoRefreshPaused = false;
-			}
-			await this.updateHeaderControls();
-			return false;
-		}
+		return this.setTaskStatus(task, completed ? TASK_STATUS_DONE : TASK_STATUS_TODO);
 	}
 
 	async setDeferredUntil(file: TFile, deferredUntil: string): Promise<void> {
@@ -321,6 +356,60 @@ export default class VaultTasksPlugin extends Plugin {
 			const message =
 				error instanceof Error ? error.message : "Could not hide the note from the task list.";
 			new Notice(message);
+		}
+	}
+
+	async setTasksStatus(
+		tasks: TaskItem[],
+		statusSymbol: string,
+		options?: { onlyUnchecked?: boolean },
+	): Promise<void> {
+		if (tasks.length === 0) {
+			return;
+		}
+
+		let updatedCount = 0;
+		const { onlyUnchecked = false } = options ?? {};
+		const file = tasks[0].file;
+
+		try {
+			this.autoRefreshPaused = true;
+			const activeView = this.app.workspace.getActiveViewOfType(MarkdownView);
+
+			if (activeView?.file?.path === file.path) {
+				updatedCount = updateSpecificTasksInEditor(activeView.editor, tasks, statusSymbol, {
+					onlyUnchecked,
+				});
+			} else {
+				await this.app.vault.process(file, (content) => {
+					const result = updateSpecificTasksInContent(content, tasks, statusSymbol, {
+						onlyUnchecked,
+					});
+					updatedCount = result.updatedCount;
+					return result.content;
+				});
+			}
+
+			this.autoRefreshPaused = false;
+			this.manualRefreshRequired = false;
+			await this.updateHeaderControls();
+
+			if (updatedCount === 0) {
+				new Notice(
+					statusSymbol === TASK_STATUS_CANCELLED
+						? "No pending tasks to cancel."
+						: "No tasks needed updating.",
+				);
+				return;
+			}
+
+			await this.refreshIndex();
+		} catch (error) {
+			this.autoRefreshPaused = false;
+			const message =
+				error instanceof Error ? error.message : "Could not update the selected tasks.";
+			new Notice(message);
+			await this.updateHeaderControls();
 		}
 	}
 
@@ -362,21 +451,23 @@ export default class VaultTasksPlugin extends Plugin {
 
 	private async buildTaskGroups(): Promise<TaskGroup[]> {
 		const taskFiles = this.app.vault.getMarkdownFiles().flatMap((file) => {
-			const taskItems = getTaskListItems(this.app.metadataCache.getFileCache(file));
+			const cache = this.app.metadataCache.getFileCache(file);
+			const taskItems = getTaskListItems(cache);
 
 			if (taskItems.length === 0) {
 				return [];
 			}
 
-			return [{ file, taskItems }];
+			return [{ cache, file, taskItems }];
 		});
 
 		const groups = await Promise.all(
-			taskFiles.map(async ({ file, taskItems }) => {
+			taskFiles.map(async ({ cache, file, taskItems }) => {
 				const content = await this.app.vault.cachedRead(file);
 				const lines = content.split(/\r?\n/);
+				const headings = getHeadingCaches(cache);
 				const tasks = taskItems
-					.map((taskItem) => buildTaskItem(file, taskItem, lines))
+					.map((taskItem) => buildTaskItem(file, taskItem, lines, headings))
 					.filter((task): task is TaskItem => task !== null)
 					.sort((left, right) => left.line - right.line);
 
@@ -478,7 +569,7 @@ export default class VaultTasksPlugin extends Plugin {
 		}
 	}
 
-	private toggleTaskInEditor(editor: Editor, task: TaskItem, completed: boolean): void {
+	private setTaskStatusInEditor(editor: Editor, task: TaskItem, statusSymbol: string): void {
 		const lines = collectEditorLines(editor);
 		const targetLine = findTaskLine(lines, task);
 
@@ -486,7 +577,7 @@ export default class VaultTasksPlugin extends Plugin {
 			throw new Error("The task moved before it could be updated. Refresh and try again.");
 		}
 
-		const nextLine = setTaskCompletion(lines[targetLine], completed);
+		const nextLine = setTaskStatusSymbol(lines[targetLine], statusSymbol);
 		if (nextLine === null) {
 			throw new Error("The source line is no longer a standard Markdown task.");
 		}
@@ -579,6 +670,33 @@ class VaultTasksView extends ItemView {
 			void this.app.workspace.openLinkText(linktext, "/", Keymap.isModEvent(event));
 		});
 
+		this.registerDomEvent(this.contentEl, "contextmenu", (event) => {
+			const target = event.target;
+
+			if (!(target instanceof HTMLElement)) {
+				return;
+			}
+
+			const listItemEl = target.closest<HTMLElement>("li[data-task-key]");
+			if (!listItemEl) {
+				return;
+			}
+
+			const taskKey = listItemEl.getAttribute("data-task-key");
+			if (!taskKey) {
+				return;
+			}
+
+			const task = this.renderedTasks.get(taskKey);
+			if (!task) {
+				return;
+			}
+
+			event.preventDefault();
+			event.stopPropagation();
+			this.showTaskMenu(event, listItemEl, task);
+		});
+
 		await this.render();
 	}
 
@@ -597,7 +715,7 @@ class VaultTasksView extends ItemView {
 
 	async render(): Promise<void> {
 		const snapshot = this.plugin.getSnapshot();
-		const { markdown, renderedGroups, renderedTasks } = buildRenderedDocument(
+		const { markdown, renderedGroups, renderedSections, renderedTasks } = buildRenderedDocument(
 			snapshot,
 			this.app.metadataCache,
 			(file) => this.plugin.getBacklinkFiles(file),
@@ -645,6 +763,8 @@ class VaultTasksView extends ItemView {
 
 			checkbox.dataset.taskKey = task.key;
 			this.renderedTasks.set(task.key, task);
+			const listItemEl = checkbox.closest("li");
+			listItemEl?.setAttr("data-task-key", task.key);
 			this.addJumpButton(checkbox, task);
 		}
 
@@ -659,6 +779,18 @@ class VaultTasksView extends ItemView {
 
 			this.bindHeadingMenu(headingEl, group);
 			this.decorateHeadingContext(headingEl);
+		}
+
+		const sectionHeadings = Array.from(sizerEl.querySelectorAll<HTMLHeadingElement>("h3"));
+
+		for (const [index, headingEl] of sectionHeadings.entries()) {
+			const section = renderedSections[index];
+
+			if (!section) {
+				continue;
+			}
+
+			this.bindSectionMenu(headingEl, section);
 		}
 	}
 
@@ -683,9 +815,12 @@ class VaultTasksView extends ItemView {
 		}
 
 		const filterEl = createDiv({ cls: "vault-tasks-view__header-filters" });
+		const filtersGroupEl = filterEl.createDiv({
+			cls: "vault-tasks-view__header-group",
+		});
 
 		for (const filter of ["all", "pending", "completed"] as TaskFilter[]) {
-			const buttonEl = filterEl.createEl("button", {
+			const buttonEl = filtersGroupEl.createEl("button", {
 				cls: ["clickable-icon", "view-action", "vault-tasks-view__header-filter"],
 				attr: {
 					"data-tooltip-position": "bottom",
@@ -703,7 +838,16 @@ class VaultTasksView extends ItemView {
 			this.filterButtons.set(filter, buttonEl);
 		}
 
-		const archiveButtonEl = filterEl.createEl("button", {
+		filterEl.createSpan({
+			cls: "vault-tasks-view__header-separator",
+			attr: { "aria-hidden": "true" },
+		});
+
+		const archiveGroupEl = filterEl.createDiv({
+			cls: "vault-tasks-view__header-group",
+		});
+
+		const archiveButtonEl = archiveGroupEl.createEl("button", {
 			cls: ["clickable-icon", "view-action", "vault-tasks-view__header-filter"],
 			attr: {
 				"data-tooltip-position": "bottom",
@@ -720,7 +864,16 @@ class VaultTasksView extends ItemView {
 
 		this.archiveButtonEl = archiveButtonEl;
 
-		const connectionsButtonEl = filterEl.createEl("button", {
+		filterEl.createSpan({
+			cls: "vault-tasks-view__header-separator",
+			attr: { "aria-hidden": "true" },
+		});
+
+		const connectionsGroupEl = filterEl.createDiv({
+			cls: "vault-tasks-view__header-group",
+		});
+
+		const connectionsButtonEl = connectionsGroupEl.createEl("button", {
 			cls: ["clickable-icon", "view-action", "vault-tasks-view__header-filter"],
 			attr: {
 				"data-tooltip-position": "bottom",
@@ -814,6 +967,95 @@ class VaultTasksView extends ItemView {
 		listItemEl.appendChild(jumpButtonEl);
 	}
 
+	private applyTaskStatusToElement(listItemEl: HTMLElement, task: TaskItem): void {
+		const checkboxEl = listItemEl.querySelector<HTMLInputElement>("input[type='checkbox']");
+		if (!checkboxEl) {
+			return;
+		}
+
+		checkboxEl.checked = isCheckboxCheckedStatus(task.statusSymbol);
+		listItemEl.toggleClass("is-checked", checkboxEl.checked);
+
+		if (task.statusSymbol === TASK_STATUS_TODO) {
+			listItemEl.removeAttribute("data-task");
+			return;
+		}
+
+		listItemEl.setAttr("data-task", task.statusSymbol);
+	}
+
+	private showTaskMenu(event: MouseEvent, listItemEl: HTMLElement, task: TaskItem): void {
+		const menu = new Menu();
+		menu.addItem((item) => {
+			item
+				.setTitle("Open source")
+				.setIcon("file-text")
+				.onClick(() => {
+					void this.plugin.openTask(task);
+				});
+		});
+		menu.addItem((item) => {
+			item
+				.setTitle("Copy text")
+				.setIcon("copy")
+				.onClick(() => {
+					void this.plugin.copyToClipboard(task.text, "Copied task text.");
+				});
+		});
+		menu.addItem((item) => {
+			item
+				.setTitle("Copy task line")
+				.setIcon("copy")
+				.onClick(() => {
+					void this.plugin.copyToClipboard(task.rawLine.trim(), "Copied task line.");
+				});
+		});
+		menu.addItem((item) => {
+			item
+				.setTitle("Copy note path")
+				.setIcon("copy")
+				.onClick(() => {
+					void this.plugin.copyToClipboard(task.file.path, "Copied note path.");
+				});
+		});
+		menu.addSeparator();
+
+		const statusActions: Array<{ title: string; icon: string; symbol: string }> = [
+			{ title: "Todo", icon: "circle", symbol: TASK_STATUS_TODO },
+			{ title: "In progress", icon: "loader", symbol: TASK_STATUS_IN_PROGRESS },
+			{ title: "Done", icon: "check", symbol: TASK_STATUS_DONE },
+			{ title: "Cancelled", icon: "minus", symbol: TASK_STATUS_CANCELLED },
+			{ title: "Deferred", icon: "fast-forward", symbol: TASK_STATUS_DEFERRED },
+		];
+
+			for (const statusAction of statusActions) {
+				menu.addItem((item) => {
+					const disableCancelled =
+						statusAction.symbol === TASK_STATUS_CANCELLED &&
+						isCheckboxCheckedStatus(task.statusSymbol) &&
+						task.statusSymbol !== TASK_STATUS_CANCELLED;
+
+					item
+						.setTitle(statusAction.title)
+						.setIcon(statusAction.icon)
+						.setChecked(task.statusSymbol === statusAction.symbol)
+						.setDisabled(disableCancelled)
+						.onClick(() => {
+							void (async () => {
+								const didUpdate = await this.plugin.setTaskStatus(task, statusAction.symbol);
+							if (!didUpdate) {
+								return;
+							}
+
+							this.applyTaskStatusToElement(listItemEl, task);
+						})();
+					});
+			});
+		}
+
+		menu.showAtMouseEvent(event);
+	}
+
 	private bindHeadingMenu(headingEl: HTMLHeadingElement, group: TaskGroup): void {
 		const titleLinkEl = headingEl.querySelector<HTMLAnchorElement>("a.internal-link");
 		if (!titleLinkEl) {
@@ -825,6 +1067,59 @@ class VaultTasksView extends ItemView {
 			event.stopPropagation();
 
 			const menu = new Menu();
+			menu.addItem((item) => {
+				item
+					.setTitle("Open")
+					.setIcon("file-text")
+					.onClick(() => {
+						void this.plugin.openNote(group.file);
+					});
+			});
+			menu.addItem((item) => {
+				item
+					.setTitle("Copy name")
+					.setIcon("copy")
+					.onClick(() => {
+						void this.plugin.copyToClipboard(group.noteTitle, "Copied note name.");
+					});
+			});
+			menu.addItem((item) => {
+				item
+					.setTitle("Copy path")
+					.setIcon("copy")
+					.onClick(() => {
+						void this.plugin.copyToClipboard(group.file.path, "Copied note path.");
+					});
+			});
+			menu.addItem((item) => {
+				item
+					.setTitle("Copy wiki link")
+					.setIcon("link")
+					.onClick(() => {
+						const linkText = this.app.metadataCache.fileToLinktext(group.file, "/", true);
+						void this.plugin.copyToClipboard(`[[${linkText}]]`, "Copied wiki link.");
+					});
+			});
+			menu.addSeparator();
+			menu.addItem((item) => {
+				item
+					.setTitle("Complete all")
+					.setIcon("check")
+					.onClick(() => {
+						void this.plugin.setTasksStatus(group.tasks, TASK_STATUS_DONE);
+					});
+			});
+			menu.addItem((item) => {
+				item
+					.setTitle("Cancel pending")
+					.setIcon("minus")
+					.onClick(() => {
+						void this.plugin.setTasksStatus(group.tasks, TASK_STATUS_CANCELLED, {
+							onlyUnchecked: true,
+						});
+					});
+			});
+			menu.addSeparator();
 			menu.addItem((item) => {
 				item
 					.setTitle("Defer until")
@@ -840,28 +1135,41 @@ class VaultTasksView extends ItemView {
 						).open();
 					});
 			});
-			menu.addItem((item) => {
-				item
-					.setTitle("Complete all")
-					.setIcon("check")
-					.onClick(() => {
-						void this.plugin.setAllTasksCompletion(group.file, true);
-					});
-			});
-			menu.addItem((item) => {
-				item
-					.setTitle("Cancel all")
-					.setIcon("circle")
-					.onClick(() => {
-						void this.plugin.setAllTasksCompletion(group.file, false);
-					});
-			});
+			menu.addSeparator();
 			menu.addItem((item) => {
 				item
 					.setTitle("Hide")
 					.setIcon("eye-off")
 					.onClick(() => {
 						void this.plugin.hideFromTaskList(group.file);
+					});
+			});
+			menu.showAtMouseEvent(event);
+		});
+	}
+
+	private bindSectionMenu(headingEl: HTMLHeadingElement, section: TaskSectionGroup): void {
+		this.registerDomEvent(headingEl, "contextmenu", (event) => {
+			event.preventDefault();
+			event.stopPropagation();
+
+			const menu = new Menu();
+			menu.addItem((item) => {
+				item
+					.setTitle("Complete all")
+					.setIcon("check")
+					.onClick(() => {
+						void this.plugin.setTasksStatus(section.tasks, TASK_STATUS_DONE);
+					});
+			});
+			menu.addItem((item) => {
+				item
+					.setTitle("Cancel pending")
+					.setIcon("minus")
+					.onClick(() => {
+						void this.plugin.setTasksStatus(section.tasks, TASK_STATUS_CANCELLED, {
+							onlyUnchecked: true,
+						});
 					});
 			});
 			menu.showAtMouseEvent(event);
@@ -993,9 +1301,15 @@ function buildRenderedDocument(
 	snapshot: TaskSnapshot,
 	metadataCache: VaultTasksPlugin["app"]["metadataCache"],
 	getBacklinkFiles: (file: TFile) => TFile[],
-): { markdown: string; renderedGroups: TaskGroup[]; renderedTasks: TaskItem[] } {
+): {
+	markdown: string;
+	renderedGroups: TaskGroup[];
+	renderedSections: TaskSectionGroup[];
+	renderedTasks: TaskItem[];
+} {
 	const sections: string[] = [];
 	const renderedGroups: TaskGroup[] = [];
+	const renderedSections: TaskSectionGroup[] = [];
 	const renderedTasks: TaskItem[] = [];
 	const today = getTodayDateString();
 
@@ -1028,8 +1342,34 @@ function buildRenderedDocument(
 			}
 		}
 
+		let currentSectionKey: string | null = null;
+		let currentSection: TaskSectionGroup | null = null;
+
 		for (const task of visibleTasks) {
+			const sectionKey =
+				task.sectionHeading !== null && task.sectionLine !== null
+					? `${task.sectionLine}:${task.sectionHeading}`
+					: null;
+
+			if (sectionKey !== currentSectionKey) {
+				currentSectionKey = sectionKey;
+
+				if (task.sectionHeading !== null) {
+					sections.push(`### ${task.sectionHeading}`);
+					currentSection = {
+						file: group.file,
+						heading: task.sectionHeading,
+						line: task.sectionLine ?? task.line,
+						tasks: [],
+					};
+					renderedSections.push(currentSection);
+				} else {
+					currentSection = null;
+				}
+			}
+
 			sections.push(task.renderedLine);
+			currentSection?.tasks.push(task);
 			renderedTasks.push(task);
 		}
 
@@ -1044,6 +1384,7 @@ function buildRenderedDocument(
 		return {
 			markdown: emptyMessage,
 			renderedGroups,
+			renderedSections,
 			renderedTasks,
 		};
 	}
@@ -1051,6 +1392,7 @@ function buildRenderedDocument(
 	return {
 		markdown: sections.join("\n").trim(),
 		renderedGroups,
+		renderedSections,
 		renderedTasks,
 	};
 }
@@ -1071,7 +1413,12 @@ function buildConnectionsLine(
 	return `<span class="vault-tasks-view__connections-label">Related to:</span> ${renderedLinks.join(", ")}`;
 }
 
-function buildTaskItem(file: TFile, taskItem: ListItemCache, lines: string[]): TaskItem | null {
+function buildTaskItem(
+	file: TFile,
+	taskItem: ListItemCache,
+	lines: string[],
+	headings: HeadingCache[],
+): TaskItem | null {
 	const line = taskItem.position.start.line;
 	const rawLine = lines[line];
 
@@ -1084,13 +1431,19 @@ function buildTaskItem(file: TFile, taskItem: ListItemCache, lines: string[]): T
 		return null;
 	}
 
+	const section = findTaskSection(line, headings);
+	const statusSymbol = normalizeTaskStatusSymbol(taskItem.task);
+
 	return {
-		completed: taskItem.task !== " ",
+		completed: isCompletedTaskStatus(statusSymbol),
 		file,
 		key: `${file.path}:${line}`,
 		line,
 		rawLine,
 		renderedLine: rawLine.trimStart(),
+		sectionHeading: section?.heading ?? null,
+		sectionLine: section?.position.start.line ?? null,
+		statusSymbol,
 		text,
 	};
 }
@@ -1217,25 +1570,58 @@ function getTaskListItems(cache: CachedMetadata | null): ListItemCache[] {
 	return cache.listItems.filter((item): item is ListItemCache => item.task !== undefined);
 }
 
+function getHeadingCaches(cache: CachedMetadata | null): HeadingCache[] {
+	if (!cache?.headings) {
+		return [];
+	}
+
+	return [...cache.headings].sort(
+		(left, right) => left.position.start.line - right.position.start.line,
+	);
+}
+
 function matchesFilter(task: TaskItem, filter: TaskFilter): boolean {
 	switch (filter) {
 		case "pending":
-			return !task.completed;
+			return isPendingTaskStatus(task.statusSymbol);
 		case "completed":
-			return task.completed;
+			return isCompletedTaskStatus(task.statusSymbol);
 		default:
 			return true;
 	}
 }
 
 function setTaskCompletion(rawLine: string, completed: boolean): string | null {
+	return setTaskStatusSymbol(rawLine, completed ? TASK_STATUS_DONE : TASK_STATUS_TODO);
+}
+
+function setTaskStatusSymbol(rawLine: string, statusSymbol: string): string | null {
 	const match = rawLine.match(TASK_LINE_PATTERN);
 
 	if (!match) {
 		return null;
 	}
 
-	return `${match[1]}${completed ? "x" : " "}${match[3]}`;
+	return `${match[1]}${statusSymbol}${match[3]}`;
+}
+
+function getTaskStatusSymbol(rawLine: string): string | null {
+	const match = rawLine.match(TASK_LINE_PATTERN);
+	return match ? match[2] : null;
+}
+
+function findTaskSection(taskLine: number, headings: HeadingCache[]): HeadingCache | null {
+	let nearestHeading: HeadingCache | null = null;
+
+	for (const heading of headings) {
+		if (heading.position.start.line >= taskLine) {
+			break;
+		}
+
+		nearestHeading = heading;
+	}
+
+	return nearestHeading;
 }
 
 function updateAllTasksInEditor(editor: Editor, completed: boolean): number {
@@ -1256,7 +1642,50 @@ function updateAllTasksInEditor(editor: Editor, completed: boolean): number {
 	return updatedCount;
 }
 
+function updateSpecificTasksInEditor(
+	editor: Editor,
+	tasks: TaskItem[],
+	statusSymbol: string,
+	options?: { onlyUnchecked?: boolean },
+): number {
+	const lines = collectEditorLines(editor);
+	let updatedCount = 0;
+
+	for (const task of tasks) {
+		const targetLine = findTaskLine(lines, task);
+
+		if (targetLine === null) {
+			continue;
+		}
+
+		const currentLine = lines[targetLine];
+		const currentStatus = getTaskStatusSymbol(currentLine);
+		if (currentStatus === null) {
+			continue;
+		}
+
+		if (options?.onlyUnchecked && currentStatus !== TASK_STATUS_TODO) {
+			continue;
+		}
+
+		const nextLine = setTaskStatusSymbol(currentLine, statusSymbol);
+		if (nextLine === null || nextLine === currentLine) {
+			continue;
+		}
+
+		lines[targetLine] = nextLine;
+		editor.setLine(targetLine, nextLine);
+		updatedCount += 1;
+	}
+
+	return updatedCount;
+}
+
 function updateTaskInContent(content: string, task: TaskItem, completed: boolean): string {
+	return updateTaskStatusInContent(content, task, completed ? TASK_STATUS_DONE : TASK_STATUS_TODO);
+}
+
+function updateTaskStatusInContent(content: string, task: TaskItem, statusSymbol: string): string {
 	const newline = content.includes("\r\n") ? "\r\n" : "\n";
 	const lines = content.split(/\r?\n/);
 	const targetLine = findTaskLine(lines, task);
@@ -1265,7 +1694,7 @@ function updateTaskInContent(content: string, task: TaskItem, completed: boolean
 		throw new Error("The task moved before it could be updated. Refresh and try again.");
 	}
 
-	const nextLine = setTaskCompletion(lines[targetLine], completed);
+	const nextLine = setTaskStatusSymbol(lines[targetLine], statusSymbol);
 	if (nextLine === null) {
 		throw new Error("The source line is no longer a standard Markdown task.");
 	}
@@ -1298,6 +1727,77 @@ function updateAllTasksInContent(
 		content: lines.join(newline),
 		updatedCount,
 	};
+}
+
+function updateSpecificTasksInContent(
+	content: string,
+	tasks: TaskItem[],
+	statusSymbol: string,
+	options?: { onlyUnchecked?: boolean },
+): { content: string; updatedCount: number } {
+	const newline = content.includes("\r\n") ? "\r\n" : "\n";
+	const lines = content.split(/\r?\n/);
+	let updatedCount = 0;
+
+	for (const task of tasks) {
+		const targetLine = findTaskLine(lines, task);
+
+		if (targetLine === null) {
+			continue;
+		}
+
+		const currentLine = lines[targetLine];
+		const currentStatus = getTaskStatusSymbol(currentLine);
+		if (currentStatus === null) {
+			continue;
+		}
+
+		if (options?.onlyUnchecked && currentStatus !== TASK_STATUS_TODO) {
+			continue;
+		}
+
+		const nextLine = setTaskStatusSymbol(currentLine, statusSymbol);
+		if (nextLine === null || nextLine === currentLine) {
+			continue;
+		}
+
+		lines[targetLine] = nextLine;
+		updatedCount += 1;
+	}
+
+	return {
+		content: lines.join(newline),
+		updatedCount,
+	};
+}
+
+function isCheckboxCheckedStatus(statusSymbol: string): boolean {
+	return statusSymbol !== TASK_STATUS_TODO;
+}
+
+function isCompletedTaskStatus(statusSymbol: string): boolean {
+	return statusSymbol === TASK_STATUS_DONE || statusSymbol === "X" || statusSymbol === TASK_STATUS_CANCELLED;
+}
+
+function isPendingTaskStatus(statusSymbol: string): boolean {
+	return (
+		statusSymbol === TASK_STATUS_TODO ||
+		statusSymbol === TASK_STATUS_IN_PROGRESS
+	);
+}
+
+function normalizeTaskStatusSymbol(statusSymbol: string | undefined): string {
+	switch (statusSymbol) {
+		case TASK_STATUS_TODO:
+		case TASK_STATUS_IN_PROGRESS:
+		case TASK_STATUS_DONE:
+		case "X":
+		case TASK_STATUS_CANCELLED:
+		case TASK_STATUS_DEFERRED:
+			return statusSymbol;
+		default:
+			return statusSymbol || TASK_STATUS_TODO;
+	}
 }
 
 const DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;

@@ -33,6 +33,11 @@ var VIEW_TYPE_TASKS = "vault-tasks-view";
 var VIEW_TITLE = "Vault tasks";
 var DEFERRED_UNTIL_KEY = "deffered-until";
 var HIDDEN_FROM_TASKS_KEY = "hide-from-vault-tasks";
+var TASK_STATUS_CANCELLED = "-";
+var TASK_STATUS_DEFERRED = ">";
+var TASK_STATUS_DONE = "x";
+var TASK_STATUS_IN_PROGRESS = "/";
+var TASK_STATUS_TODO = " ";
 var FRONTMATTER_PATTERN = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/;
 var TASK_LINE_PATTERN = /^(\s*(?:[-*+]|\d+[.)])\s+\[)(.)(\].*)$/;
 var TASK_TEXT_PATTERN = /^\s*(?:[-*+]|\d+[.)])\s+\[.\]\s?(.*)$/;
@@ -172,11 +177,23 @@ var VaultTasksPlugin = class extends import_obsidian.Plugin {
     this.app.workspace.setActiveLeaf(leaf, { focus: true });
     await this.app.workspace.revealLeaf(leaf);
   }
+  async copyToClipboard(text, successMessage) {
+    try {
+      await window.navigator.clipboard.writeText(text);
+      new import_obsidian.Notice(successMessage);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Could not copy to the clipboard.";
+      new import_obsidian.Notice(message);
+    }
+  }
+  async openNote(file) {
+    const leaf = this.getPreferredNoteLeaf();
+    await leaf.openFile(file);
+    this.app.workspace.setActiveLeaf(leaf, { focus: true });
+  }
   async openTask(task) {
     var _a;
-    const leaf = this.getPreferredNoteLeaf();
-    await leaf.openFile(task.file);
-    this.app.workspace.setActiveLeaf(leaf, { focus: true });
+    await this.openNote(task.file);
     const view = this.app.workspace.getActiveViewOfType(import_obsidian.MarkdownView);
     if (!view || ((_a = view.file) == null ? void 0 : _a.path) !== task.file.path) {
       return;
@@ -191,6 +208,38 @@ var VaultTasksPlugin = class extends import_obsidian.Plugin {
       true
     );
     view.editor.focus();
+  }
+  async setTaskStatus(task, statusSymbol) {
+    var _a;
+    try {
+      this.autoRefreshPaused = true;
+      const activeView = this.app.workspace.getActiveViewOfType(import_obsidian.MarkdownView);
+      if (((_a = activeView == null ? void 0 : activeView.file) == null ? void 0 : _a.path) === task.file.path) {
+        this.setTaskStatusInEditor(activeView.editor, task, statusSymbol);
+      } else {
+        await this.app.vault.process(task.file, (content) => {
+          return updateTaskStatusInContent(content, task, statusSymbol);
+        });
+      }
+      const nextLine = setTaskStatusSymbol(task.rawLine, statusSymbol);
+      if (nextLine !== null) {
+        task.completed = isCompletedTaskStatus(statusSymbol);
+        task.rawLine = nextLine;
+        task.renderedLine = nextLine.trimStart();
+        task.statusSymbol = statusSymbol;
+      }
+      this.manualRefreshRequired = true;
+      await this.updateHeaderControls();
+      return true;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Could not update the task.";
+      new import_obsidian.Notice(message);
+      if (!this.manualRefreshRequired) {
+        this.autoRefreshPaused = false;
+      }
+      await this.updateHeaderControls();
+      return false;
+    }
   }
   async refreshIndex() {
     if (this.refreshing) {
@@ -214,35 +263,7 @@ var VaultTasksPlugin = class extends import_obsidian.Plugin {
     }
   }
   async toggleTask(task, completed) {
-    var _a;
-    try {
-      this.autoRefreshPaused = true;
-      const activeView = this.app.workspace.getActiveViewOfType(import_obsidian.MarkdownView);
-      if (((_a = activeView == null ? void 0 : activeView.file) == null ? void 0 : _a.path) === task.file.path) {
-        this.toggleTaskInEditor(activeView.editor, task, completed);
-      } else {
-        await this.app.vault.process(task.file, (content) => {
-          return updateTaskInContent(content, task, completed);
-        });
-      }
-      const nextLine = setTaskCompletion(task.rawLine, completed);
-      if (nextLine !== null) {
-        task.completed = completed;
-        task.rawLine = nextLine;
-        task.renderedLine = nextLine.trimStart();
-      }
-      this.manualRefreshRequired = true;
-      await this.updateHeaderControls();
-      return true;
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "Could not update the task.";
-      new import_obsidian.Notice(message);
-      if (!this.manualRefreshRequired) {
-        this.autoRefreshPaused = false;
-      }
-      await this.updateHeaderControls();
-      return false;
-    }
+    return this.setTaskStatus(task, completed ? TASK_STATUS_DONE : TASK_STATUS_TODO);
   }
   async setDeferredUntil(file, deferredUntil) {
     try {
@@ -267,6 +288,47 @@ var VaultTasksPlugin = class extends import_obsidian.Plugin {
     } catch (error) {
       const message = error instanceof Error ? error.message : "Could not hide the note from the task list.";
       new import_obsidian.Notice(message);
+    }
+  }
+  async setTasksStatus(tasks, statusSymbol, options) {
+    var _a;
+    if (tasks.length === 0) {
+      return;
+    }
+    let updatedCount = 0;
+    const { onlyUnchecked = false } = options != null ? options : {};
+    const file = tasks[0].file;
+    try {
+      this.autoRefreshPaused = true;
+      const activeView = this.app.workspace.getActiveViewOfType(import_obsidian.MarkdownView);
+      if (((_a = activeView == null ? void 0 : activeView.file) == null ? void 0 : _a.path) === file.path) {
+        updatedCount = updateSpecificTasksInEditor(activeView.editor, tasks, statusSymbol, {
+          onlyUnchecked
+        });
+      } else {
+        await this.app.vault.process(file, (content) => {
+          const result = updateSpecificTasksInContent(content, tasks, statusSymbol, {
+            onlyUnchecked
+          });
+          updatedCount = result.updatedCount;
+          return result.content;
+        });
+      }
+      this.autoRefreshPaused = false;
+      this.manualRefreshRequired = false;
+      await this.updateHeaderControls();
+      if (updatedCount === 0) {
+        new import_obsidian.Notice(
+          statusSymbol === TASK_STATUS_CANCELLED ? "No pending tasks to cancel." : "No tasks needed updating."
+        );
+        return;
+      }
+      await this.refreshIndex();
+    } catch (error) {
+      this.autoRefreshPaused = false;
+      const message = error instanceof Error ? error.message : "Could not update the selected tasks.";
+      new import_obsidian.Notice(message);
+      await this.updateHeaderControls();
     }
   }
   async setAllTasksCompletion(file, completed) {
@@ -301,17 +363,19 @@ var VaultTasksPlugin = class extends import_obsidian.Plugin {
   }
   async buildTaskGroups() {
     const taskFiles = this.app.vault.getMarkdownFiles().flatMap((file) => {
-      const taskItems = getTaskListItems(this.app.metadataCache.getFileCache(file));
+      const cache = this.app.metadataCache.getFileCache(file);
+      const taskItems = getTaskListItems(cache);
       if (taskItems.length === 0) {
         return [];
       }
-      return [{ file, taskItems }];
+      return [{ cache, file, taskItems }];
     });
     const groups = await Promise.all(
-      taskFiles.map(async ({ file, taskItems }) => {
+      taskFiles.map(async ({ cache, file, taskItems }) => {
         const content = await this.app.vault.cachedRead(file);
         const lines = content.split(/\r?\n/);
-        const tasks = taskItems.map((taskItem) => buildTaskItem(file, taskItem, lines)).filter((task) => task !== null).sort((left, right) => left.line - right.line);
+        const headings = getHeadingCaches(cache);
+        const tasks = taskItems.map((taskItem) => buildTaskItem(file, taskItem, lines, headings)).filter((task) => task !== null).sort((left, right) => left.line - right.line);
         return {
           deferredUntil: extractDeferredUntil(content),
           file,
@@ -384,13 +448,13 @@ var VaultTasksPlugin = class extends import_obsidian.Plugin {
       }
     }
   }
-  toggleTaskInEditor(editor, task, completed) {
+  setTaskStatusInEditor(editor, task, statusSymbol) {
     const lines = collectEditorLines(editor);
     const targetLine = findTaskLine(lines, task);
     if (targetLine === null) {
       throw new Error("The task moved before it could be updated. Refresh and try again.");
     }
-    const nextLine = setTaskCompletion(lines[targetLine], completed);
+    const nextLine = setTaskStatusSymbol(lines[targetLine], statusSymbol);
     if (nextLine === null) {
       throw new Error("The source line is no longer a standard Markdown task.");
     }
@@ -462,6 +526,27 @@ var VaultTasksView = class extends import_obsidian.ItemView {
       event.stopPropagation();
       void this.app.workspace.openLinkText(linktext, "/", import_obsidian.Keymap.isModEvent(event));
     });
+    this.registerDomEvent(this.contentEl, "contextmenu", (event) => {
+      const target = event.target;
+      if (!(target instanceof HTMLElement)) {
+        return;
+      }
+      const listItemEl = target.closest("li[data-task-key]");
+      if (!listItemEl) {
+        return;
+      }
+      const taskKey = listItemEl.getAttribute("data-task-key");
+      if (!taskKey) {
+        return;
+      }
+      const task = this.renderedTasks.get(taskKey);
+      if (!task) {
+        return;
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      this.showTaskMenu(event, listItemEl, task);
+    });
     await this.render();
   }
   async onClose() {
@@ -480,7 +565,7 @@ var VaultTasksView = class extends import_obsidian.ItemView {
   async render() {
     var _a;
     const snapshot = this.plugin.getSnapshot();
-    const { markdown, renderedGroups, renderedTasks } = buildRenderedDocument(
+    const { markdown, renderedGroups, renderedSections, renderedTasks } = buildRenderedDocument(
       snapshot,
       this.app.metadataCache,
       (file) => this.plugin.getBacklinkFiles(file)
@@ -520,6 +605,8 @@ var VaultTasksView = class extends import_obsidian.ItemView {
       }
       checkbox.dataset.taskKey = task.key;
       this.renderedTasks.set(task.key, task);
+      const listItemEl = checkbox.closest("li");
+      listItemEl == null ? void 0 : listItemEl.setAttr("data-task-key", task.key);
       this.addJumpButton(checkbox, task);
     }
     const headings = Array.from(sizerEl.querySelectorAll("h2"));
@@ -530,6 +617,14 @@ var VaultTasksView = class extends import_obsidian.ItemView {
       }
       this.bindHeadingMenu(headingEl, group);
       this.decorateHeadingContext(headingEl);
+    }
+    const sectionHeadings = Array.from(sizerEl.querySelectorAll("h3"));
+    for (const [index, headingEl] of sectionHeadings.entries()) {
+      const section = renderedSections[index];
+      if (!section) {
+        continue;
+      }
+      this.bindSectionMenu(headingEl, section);
     }
   }
   updateHeaderControls() {
@@ -548,8 +643,11 @@ var VaultTasksView = class extends import_obsidian.ItemView {
       return;
     }
     const filterEl = createDiv({ cls: "vault-tasks-view__header-filters" });
+    const filtersGroupEl = filterEl.createDiv({
+      cls: "vault-tasks-view__header-group"
+    });
     for (const filter of ["all", "pending", "completed"]) {
-      const buttonEl = filterEl.createEl("button", {
+      const buttonEl = filtersGroupEl.createEl("button", {
         cls: ["clickable-icon", "view-action", "vault-tasks-view__header-filter"],
         attr: {
           "data-tooltip-position": "bottom",
@@ -564,7 +662,14 @@ var VaultTasksView = class extends import_obsidian.ItemView {
       });
       this.filterButtons.set(filter, buttonEl);
     }
-    const archiveButtonEl = filterEl.createEl("button", {
+    filterEl.createSpan({
+      cls: "vault-tasks-view__header-separator",
+      attr: { "aria-hidden": "true" }
+    });
+    const archiveGroupEl = filterEl.createDiv({
+      cls: "vault-tasks-view__header-group"
+    });
+    const archiveButtonEl = archiveGroupEl.createEl("button", {
       cls: ["clickable-icon", "view-action", "vault-tasks-view__header-filter"],
       attr: {
         "data-tooltip-position": "bottom",
@@ -578,7 +683,14 @@ var VaultTasksView = class extends import_obsidian.ItemView {
       void this.plugin.applyTaskChanges();
     });
     this.archiveButtonEl = archiveButtonEl;
-    const connectionsButtonEl = filterEl.createEl("button", {
+    filterEl.createSpan({
+      cls: "vault-tasks-view__header-separator",
+      attr: { "aria-hidden": "true" }
+    });
+    const connectionsGroupEl = filterEl.createDiv({
+      cls: "vault-tasks-view__header-group"
+    });
+    const connectionsButtonEl = connectionsGroupEl.createEl("button", {
       cls: ["clickable-icon", "view-action", "vault-tasks-view__header-filter"],
       attr: {
         "data-tooltip-position": "bottom",
@@ -654,6 +766,65 @@ var VaultTasksView = class extends import_obsidian.ItemView {
     });
     listItemEl.appendChild(jumpButtonEl);
   }
+  applyTaskStatusToElement(listItemEl, task) {
+    const checkboxEl = listItemEl.querySelector("input[type='checkbox']");
+    if (!checkboxEl) {
+      return;
+    }
+    checkboxEl.checked = isCheckboxCheckedStatus(task.statusSymbol);
+    listItemEl.toggleClass("is-checked", checkboxEl.checked);
+    if (task.statusSymbol === TASK_STATUS_TODO) {
+      listItemEl.removeAttribute("data-task");
+      return;
+    }
+    listItemEl.setAttr("data-task", task.statusSymbol);
+  }
+  showTaskMenu(event, listItemEl, task) {
+    const menu = new import_obsidian.Menu();
+    menu.addItem((item) => {
+      item.setTitle("Open source").setIcon("file-text").onClick(() => {
+        void this.plugin.openTask(task);
+      });
+    });
+    menu.addItem((item) => {
+      item.setTitle("Copy text").setIcon("copy").onClick(() => {
+        void this.plugin.copyToClipboard(task.text, "Copied task text.");
+      });
+    });
+    menu.addItem((item) => {
+      item.setTitle("Copy task line").setIcon("copy").onClick(() => {
+        void this.plugin.copyToClipboard(task.rawLine.trim(), "Copied task line.");
+      });
+    });
+    menu.addItem((item) => {
+      item.setTitle("Copy note path").setIcon("copy").onClick(() => {
+        void this.plugin.copyToClipboard(task.file.path, "Copied note path.");
+      });
+    });
+    menu.addSeparator();
+    const statusActions = [
+      { title: "Todo", icon: "circle", symbol: TASK_STATUS_TODO },
+      { title: "In progress", icon: "loader", symbol: TASK_STATUS_IN_PROGRESS },
+      { title: "Done", icon: "check", symbol: TASK_STATUS_DONE },
+      { title: "Cancelled", icon: "minus", symbol: TASK_STATUS_CANCELLED },
+      { title: "Deferred", icon: "fast-forward", symbol: TASK_STATUS_DEFERRED }
+    ];
+    for (const statusAction of statusActions) {
+      menu.addItem((item) => {
+        const disableCancelled = statusAction.symbol === TASK_STATUS_CANCELLED && isCheckboxCheckedStatus(task.statusSymbol) && task.statusSymbol !== TASK_STATUS_CANCELLED;
+        item.setTitle(statusAction.title).setIcon(statusAction.icon).setChecked(task.statusSymbol === statusAction.symbol).setDisabled(disableCancelled).onClick(() => {
+          void (async () => {
+            const didUpdate = await this.plugin.setTaskStatus(task, statusAction.symbol);
+            if (!didUpdate) {
+              return;
+            }
+            this.applyTaskStatusToElement(listItemEl, task);
+          })();
+        });
+      });
+    }
+    menu.showAtMouseEvent(event);
+  }
   bindHeadingMenu(headingEl, group) {
     const titleLinkEl = headingEl.querySelector("a.internal-link");
     if (!titleLinkEl) {
@@ -663,6 +834,41 @@ var VaultTasksView = class extends import_obsidian.ItemView {
       event.preventDefault();
       event.stopPropagation();
       const menu = new import_obsidian.Menu();
+      menu.addItem((item) => {
+        item.setTitle("Open").setIcon("file-text").onClick(() => {
+          void this.plugin.openNote(group.file);
+        });
+      });
+      menu.addItem((item) => {
+        item.setTitle("Copy name").setIcon("copy").onClick(() => {
+          void this.plugin.copyToClipboard(group.noteTitle, "Copied note name.");
+        });
+      });
+      menu.addItem((item) => {
+        item.setTitle("Copy path").setIcon("copy").onClick(() => {
+          void this.plugin.copyToClipboard(group.file.path, "Copied note path.");
+        });
+      });
+      menu.addItem((item) => {
+        item.setTitle("Copy wiki link").setIcon("link").onClick(() => {
+          const linkText = this.app.metadataCache.fileToLinktext(group.file, "/", true);
+          void this.plugin.copyToClipboard(`[[${linkText}]]`, "Copied wiki link.");
+        });
+      });
+      menu.addSeparator();
+      menu.addItem((item) => {
+        item.setTitle("Complete all").setIcon("check").onClick(() => {
+          void this.plugin.setTasksStatus(group.tasks, TASK_STATUS_DONE);
+        });
+      });
+      menu.addItem((item) => {
+        item.setTitle("Cancel pending").setIcon("minus").onClick(() => {
+          void this.plugin.setTasksStatus(group.tasks, TASK_STATUS_CANCELLED, {
+            onlyUnchecked: true
+          });
+        });
+      });
+      menu.addSeparator();
       menu.addItem((item) => {
         item.setTitle("Defer until").setIcon("calendar-days").onClick(() => {
           new DeferUntilModal(
@@ -675,19 +881,30 @@ var VaultTasksView = class extends import_obsidian.ItemView {
           ).open();
         });
       });
-      menu.addItem((item) => {
-        item.setTitle("Complete all").setIcon("check").onClick(() => {
-          void this.plugin.setAllTasksCompletion(group.file, true);
-        });
-      });
-      menu.addItem((item) => {
-        item.setTitle("Cancel all").setIcon("circle").onClick(() => {
-          void this.plugin.setAllTasksCompletion(group.file, false);
-        });
-      });
+      menu.addSeparator();
       menu.addItem((item) => {
         item.setTitle("Hide").setIcon("eye-off").onClick(() => {
           void this.plugin.hideFromTaskList(group.file);
+        });
+      });
+      menu.showAtMouseEvent(event);
+    });
+  }
+  bindSectionMenu(headingEl, section) {
+    this.registerDomEvent(headingEl, "contextmenu", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      const menu = new import_obsidian.Menu();
+      menu.addItem((item) => {
+        item.setTitle("Complete all").setIcon("check").onClick(() => {
+          void this.plugin.setTasksStatus(section.tasks, TASK_STATUS_DONE);
+        });
+      });
+      menu.addItem((item) => {
+        item.setTitle("Cancel pending").setIcon("minus").onClick(() => {
+          void this.plugin.setTasksStatus(section.tasks, TASK_STATUS_CANCELLED, {
+            onlyUnchecked: true
+          });
         });
       });
       menu.showAtMouseEvent(event);
@@ -785,9 +1002,10 @@ var DeferUntilModal = class extends import_obsidian.Modal {
   }
 };
 function buildRenderedDocument(snapshot, metadataCache, getBacklinkFiles) {
-  var _a;
+  var _a, _b;
   const sections = [];
   const renderedGroups = [];
+  const renderedSections = [];
   const renderedTasks = [];
   const today = getTodayDateString();
   for (const group of snapshot.groups) {
@@ -811,23 +1029,44 @@ function buildRenderedDocument(snapshot, metadataCache, getBacklinkFiles) {
         sections.push(buildConnectionsLine(backlinks, metadataCache));
       }
     }
+    let currentSectionKey = null;
+    let currentSection = null;
     for (const task of visibleTasks) {
+      const sectionKey = task.sectionHeading !== null && task.sectionLine !== null ? `${task.sectionLine}:${task.sectionHeading}` : null;
+      if (sectionKey !== currentSectionKey) {
+        currentSectionKey = sectionKey;
+        if (task.sectionHeading !== null) {
+          sections.push(`### ${task.sectionHeading}`);
+          currentSection = {
+            file: group.file,
+            heading: task.sectionHeading,
+            line: (_a = task.sectionLine) != null ? _a : task.line,
+            tasks: []
+          };
+          renderedSections.push(currentSection);
+        } else {
+          currentSection = null;
+        }
+      }
       sections.push(task.renderedLine);
+      currentSection == null ? void 0 : currentSection.tasks.push(task);
       renderedTasks.push(task);
     }
     sections.push("");
   }
   if (sections.length === 0) {
-    const emptyMessage = (_a = snapshot.error) != null ? _a : snapshot.filter === "all" ? "No tasks." : `No ${filterDescription(snapshot.filter)} tasks.`;
+    const emptyMessage = (_b = snapshot.error) != null ? _b : snapshot.filter === "all" ? "No tasks." : `No ${filterDescription(snapshot.filter)} tasks.`;
     return {
       markdown: emptyMessage,
       renderedGroups,
+      renderedSections,
       renderedTasks
     };
   }
   return {
     markdown: sections.join("\n").trim(),
     renderedGroups,
+    renderedSections,
     renderedTasks
   };
 }
@@ -841,7 +1080,8 @@ function buildConnectionsLine(backlinks, metadataCache) {
   });
   return `<span class="vault-tasks-view__connections-label">Related to:</span> ${renderedLinks.join(", ")}`;
 }
-function buildTaskItem(file, taskItem, lines) {
+function buildTaskItem(file, taskItem, lines, headings) {
+  var _a, _b;
   const line = taskItem.position.start.line;
   const rawLine = lines[line];
   if (rawLine === void 0) {
@@ -851,13 +1091,18 @@ function buildTaskItem(file, taskItem, lines) {
   if (text === null) {
     return null;
   }
+  const section = findTaskSection(line, headings);
+  const statusSymbol = normalizeTaskStatusSymbol(taskItem.task);
   return {
-    completed: taskItem.task !== " ",
+    completed: isCompletedTaskStatus(statusSymbol),
     file,
     key: `${file.path}:${line}`,
     line,
     rawLine,
     renderedLine: rawLine.trimStart(),
+    sectionHeading: (_a = section == null ? void 0 : section.heading) != null ? _a : null,
+    sectionLine: (_b = section == null ? void 0 : section.position.start.line) != null ? _b : null,
+    statusSymbol,
     text
   };
 }
@@ -957,22 +1202,47 @@ function getTaskListItems(cache) {
   }
   return cache.listItems.filter((item) => item.task !== void 0);
 }
+function getHeadingCaches(cache) {
+  if (!(cache == null ? void 0 : cache.headings)) {
+    return [];
+  }
+  return [...cache.headings].sort(
+    (left, right) => left.position.start.line - right.position.start.line
+  );
+}
 function matchesFilter(task, filter) {
   switch (filter) {
     case "pending":
-      return !task.completed;
+      return isPendingTaskStatus(task.statusSymbol);
     case "completed":
-      return task.completed;
+      return isCompletedTaskStatus(task.statusSymbol);
     default:
       return true;
   }
 }
 function setTaskCompletion(rawLine, completed) {
+  return setTaskStatusSymbol(rawLine, completed ? TASK_STATUS_DONE : TASK_STATUS_TODO);
+}
+function setTaskStatusSymbol(rawLine, statusSymbol) {
   const match = rawLine.match(TASK_LINE_PATTERN);
   if (!match) {
     return null;
   }
-  return `${match[1]}${completed ? "x" : " "}${match[3]}`;
+  return `${match[1]}${statusSymbol}${match[3]}`;
+}
+function getTaskStatusSymbol(rawLine) {
+  const match = rawLine.match(TASK_LINE_PATTERN);
+  return match ? match[2] : null;
+}
+function findTaskSection(taskLine, headings) {
+  let nearestHeading = null;
+  for (const heading of headings) {
+    if (heading.position.start.line >= taskLine) {
+      break;
+    }
+    nearestHeading = heading;
+  }
+  return nearestHeading;
 }
 function updateAllTasksInEditor(editor, completed) {
   let updatedCount = 0;
@@ -987,14 +1257,40 @@ function updateAllTasksInEditor(editor, completed) {
   }
   return updatedCount;
 }
-function updateTaskInContent(content, task, completed) {
+function updateSpecificTasksInEditor(editor, tasks, statusSymbol, options) {
+  const lines = collectEditorLines(editor);
+  let updatedCount = 0;
+  for (const task of tasks) {
+    const targetLine = findTaskLine(lines, task);
+    if (targetLine === null) {
+      continue;
+    }
+    const currentLine = lines[targetLine];
+    const currentStatus = getTaskStatusSymbol(currentLine);
+    if (currentStatus === null) {
+      continue;
+    }
+    if ((options == null ? void 0 : options.onlyUnchecked) && currentStatus !== TASK_STATUS_TODO) {
+      continue;
+    }
+    const nextLine = setTaskStatusSymbol(currentLine, statusSymbol);
+    if (nextLine === null || nextLine === currentLine) {
+      continue;
+    }
+    lines[targetLine] = nextLine;
+    editor.setLine(targetLine, nextLine);
+    updatedCount += 1;
+  }
+  return updatedCount;
+}
+function updateTaskStatusInContent(content, task, statusSymbol) {
   const newline = content.includes("\r\n") ? "\r\n" : "\n";
   const lines = content.split(/\r?\n/);
   const targetLine = findTaskLine(lines, task);
   if (targetLine === null) {
     throw new Error("The task moved before it could be updated. Refresh and try again.");
   }
-  const nextLine = setTaskCompletion(lines[targetLine], completed);
+  const nextLine = setTaskStatusSymbol(lines[targetLine], statusSymbol);
   if (nextLine === null) {
     throw new Error("The source line is no longer a standard Markdown task.");
   }
@@ -1018,6 +1314,57 @@ function updateAllTasksInContent(content, completed) {
     content: lines.join(newline),
     updatedCount
   };
+}
+function updateSpecificTasksInContent(content, tasks, statusSymbol, options) {
+  const newline = content.includes("\r\n") ? "\r\n" : "\n";
+  const lines = content.split(/\r?\n/);
+  let updatedCount = 0;
+  for (const task of tasks) {
+    const targetLine = findTaskLine(lines, task);
+    if (targetLine === null) {
+      continue;
+    }
+    const currentLine = lines[targetLine];
+    const currentStatus = getTaskStatusSymbol(currentLine);
+    if (currentStatus === null) {
+      continue;
+    }
+    if ((options == null ? void 0 : options.onlyUnchecked) && currentStatus !== TASK_STATUS_TODO) {
+      continue;
+    }
+    const nextLine = setTaskStatusSymbol(currentLine, statusSymbol);
+    if (nextLine === null || nextLine === currentLine) {
+      continue;
+    }
+    lines[targetLine] = nextLine;
+    updatedCount += 1;
+  }
+  return {
+    content: lines.join(newline),
+    updatedCount
+  };
+}
+function isCheckboxCheckedStatus(statusSymbol) {
+  return statusSymbol !== TASK_STATUS_TODO;
+}
+function isCompletedTaskStatus(statusSymbol) {
+  return statusSymbol === TASK_STATUS_DONE || statusSymbol === "X" || statusSymbol === TASK_STATUS_CANCELLED;
+}
+function isPendingTaskStatus(statusSymbol) {
+  return statusSymbol === TASK_STATUS_TODO || statusSymbol === TASK_STATUS_IN_PROGRESS;
+}
+function normalizeTaskStatusSymbol(statusSymbol) {
+  switch (statusSymbol) {
+    case TASK_STATUS_TODO:
+    case TASK_STATUS_IN_PROGRESS:
+    case TASK_STATUS_DONE:
+    case "X":
+    case TASK_STATUS_CANCELLED:
+    case TASK_STATUS_DEFERRED:
+      return statusSymbol;
+    default:
+      return statusSymbol || TASK_STATUS_TODO;
+  }
 }
 var DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
 function formatDate(date) {
