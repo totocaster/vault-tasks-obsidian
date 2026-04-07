@@ -51,6 +51,7 @@ var VaultTasksPlugin = class extends import_obsidian.Plugin {
     this.manualRefreshRequired = false;
     this.queuedRefresh = false;
     this.refreshing = false;
+    this.sectionFilter = null;
     this.showConnections = false;
     this.scheduleRefresh = (0, import_obsidian.debounce)(() => {
       void this.refreshIndex();
@@ -124,12 +125,16 @@ var VaultTasksPlugin = class extends import_obsidian.Plugin {
   getFilter() {
     return this.filter;
   }
+  getSectionFilter() {
+    return this.sectionFilter;
+  }
   getSnapshot() {
     return {
       error: this.lastError,
       filter: this.filter,
       groups: this.groups,
       refreshing: this.refreshing,
+      sectionFilter: this.sectionFilter,
       showConnections: this.showConnections
     };
   }
@@ -155,6 +160,15 @@ var VaultTasksPlugin = class extends import_obsidian.Plugin {
       return;
     }
     this.filter = filter;
+    await this.updateHeaderControls();
+    await this.renderAllViews();
+  }
+  async setSectionFilter(sectionFilter) {
+    if (isSameSectionFilter(this.sectionFilter, sectionFilter)) {
+      return;
+    }
+    this.sectionFilter = sectionFilter;
+    await this.updateHeaderControls();
     await this.renderAllViews();
   }
   async setShowConnections(showConnections) {
@@ -164,6 +178,30 @@ var VaultTasksPlugin = class extends import_obsidian.Plugin {
     this.showConnections = showConnections;
     await this.updateHeaderControls();
     await this.renderAllViews();
+  }
+  getAvailableSectionFilters(filter) {
+    const headings = /* @__PURE__ */ new Set();
+    let hasNoSection = false;
+    const today = getTodayDateString();
+    for (const group of this.groups) {
+      if (filter === "pending" && isDeferred(group.deferredUntil, today)) {
+        continue;
+      }
+      for (const task of group.tasks) {
+        if (!matchesFilter(task, filter)) {
+          continue;
+        }
+        if (task.sectionHeading === null) {
+          hasNoSection = true;
+          continue;
+        }
+        headings.add(task.sectionHeading);
+      }
+    }
+    return {
+      hasNoSection,
+      headings: Array.from(headings).sort((left, right) => left.localeCompare(right))
+    };
   }
   async activateView() {
     let leaf = this.getMainTaskLeaf();
@@ -472,6 +510,8 @@ var VaultTasksView = class extends import_obsidian.ItemView {
     this.markdownHostEl = null;
     this.renderComponent = null;
     this.renderedTasks = /* @__PURE__ */ new Map();
+    this.sectionFilterButtonEl = null;
+    this.sectionFilterChipEl = null;
   }
   getViewType() {
     return VIEW_TYPE_TASKS;
@@ -560,6 +600,8 @@ var VaultTasksView = class extends import_obsidian.ItemView {
     this.renderedTasks.clear();
     (_b = this.renderComponent) == null ? void 0 : _b.unload();
     this.renderComponent = null;
+    this.sectionFilterButtonEl = null;
+    this.sectionFilterChipEl = null;
     this.contentEl.empty();
   }
   async render() {
@@ -573,6 +615,7 @@ var VaultTasksView = class extends import_obsidian.ItemView {
     );
     this.ensureHeaderFilters();
     this.updateFilterButtons(snapshot.filter);
+    this.updateSectionFilterControls();
     (_a = this.renderComponent) == null ? void 0 : _a.unload();
     this.renderComponent = new import_obsidian.Component();
     this.addChild(this.renderComponent);
@@ -640,6 +683,7 @@ var VaultTasksView = class extends import_obsidian.ItemView {
     this.updateArchiveButton();
     this.updateConnectionsButton();
     this.updateFilterButtons(this.plugin.getFilter());
+    this.updateSectionFilterControls();
   }
   ensureHeaderFilters() {
     var _a, _b, _c;
@@ -670,6 +714,38 @@ var VaultTasksView = class extends import_obsidian.ItemView {
       });
       this.filterButtons.set(filter, buttonEl);
     }
+    filterEl.createSpan({
+      cls: "vault-tasks-view__header-separator",
+      attr: { "aria-hidden": "true" }
+    });
+    const sectionGroupEl = filterEl.createDiv({
+      cls: "vault-tasks-view__header-group"
+    });
+    const sectionFilterButtonEl = sectionGroupEl.createEl("button", {
+      cls: ["clickable-icon", "view-action", "vault-tasks-view__header-filter"],
+      attr: {
+        "data-tooltip-position": "bottom",
+        "aria-label": "Filter by section",
+        title: "Filter by section",
+        type: "button"
+      }
+    });
+    (0, import_obsidian.setIcon)(sectionFilterButtonEl, "filter");
+    this.registerDomEvent(sectionFilterButtonEl, "click", (event) => {
+      this.showSectionFilterMenu(event);
+    });
+    this.sectionFilterButtonEl = sectionFilterButtonEl;
+    const sectionFilterChipEl = sectionGroupEl.createEl("button", {
+      cls: "vault-tasks-view__header-chip is-hidden",
+      attr: {
+        "data-tooltip-position": "bottom",
+        type: "button"
+      }
+    });
+    this.registerDomEvent(sectionFilterChipEl, "click", () => {
+      void this.plugin.setSectionFilter(null);
+    });
+    this.sectionFilterChipEl = sectionFilterChipEl;
     filterEl.createSpan({
       cls: "vault-tasks-view__header-separator",
       attr: { "aria-hidden": "true" }
@@ -727,6 +803,29 @@ var VaultTasksView = class extends import_obsidian.ItemView {
       buttonEl.setAttr("aria-pressed", filter === activeFilter ? "true" : "false");
     }
   }
+  updateSectionFilterControls() {
+    if (this.sectionFilterButtonEl) {
+      const hasSectionFilter = this.plugin.getSectionFilter() !== null;
+      this.sectionFilterButtonEl.toggleClass("is-active", hasSectionFilter);
+      this.sectionFilterButtonEl.setAttr("aria-pressed", hasSectionFilter ? "true" : "false");
+    }
+    if (!this.sectionFilterChipEl) {
+      return;
+    }
+    const sectionFilter = this.plugin.getSectionFilter();
+    const label = getSectionFilterLabel(sectionFilter);
+    if (!label) {
+      this.sectionFilterChipEl.addClass("is-hidden");
+      this.sectionFilterChipEl.empty();
+      this.sectionFilterChipEl.removeAttribute("aria-label");
+      this.sectionFilterChipEl.removeAttribute("title");
+      return;
+    }
+    this.sectionFilterChipEl.removeClass("is-hidden");
+    this.sectionFilterChipEl.setText(label);
+    this.sectionFilterChipEl.setAttr("aria-label", `Clear section filter: ${label}`);
+    this.sectionFilterChipEl.setAttr("title", `Clear section filter: ${label}`);
+  }
   updateArchiveButton() {
     if (!this.archiveButtonEl) {
       return;
@@ -742,6 +841,48 @@ var VaultTasksView = class extends import_obsidian.ItemView {
     const showConnections = this.plugin.getShowConnections();
     this.connectionsButtonEl.toggleClass("is-active", showConnections);
     this.connectionsButtonEl.setAttr("aria-pressed", showConnections ? "true" : "false");
+  }
+  showSectionFilterMenu(event) {
+    event.preventDefault();
+    event.stopPropagation();
+    const menu = new import_obsidian.Menu();
+    const activeFilter = this.plugin.getSectionFilter();
+    const availableFilters = this.plugin.getAvailableSectionFilters(this.plugin.getFilter());
+    menu.addItem((item) => {
+      item.setTitle("All sections").setIcon("list").setChecked(activeFilter === null).onClick(() => {
+        void this.plugin.setSectionFilter(null);
+      });
+    });
+    if (availableFilters.hasNoSection || (activeFilter == null ? void 0 : activeFilter.kind) === "none") {
+      menu.addItem((item) => {
+        item.setTitle("No section").setChecked((activeFilter == null ? void 0 : activeFilter.kind) === "none").onClick(() => {
+          void this.plugin.setSectionFilter({ kind: "none" });
+        });
+      });
+    }
+    const sectionHeadings = new Set(availableFilters.headings);
+    if ((activeFilter == null ? void 0 : activeFilter.kind) === "heading") {
+      sectionHeadings.add(activeFilter.heading);
+    }
+    const sortedHeadings = Array.from(sectionHeadings).sort(
+      (left, right) => left.localeCompare(right)
+    );
+    if (sortedHeadings.length > 0) {
+      menu.addSeparator();
+      for (const heading of sortedHeadings) {
+        menu.addItem((item) => {
+          item.setTitle(heading).setChecked((activeFilter == null ? void 0 : activeFilter.kind) === "heading" && activeFilter.heading === heading).onClick(() => {
+            void this.plugin.setSectionFilter({ kind: "heading", heading });
+          });
+        });
+      }
+    } else if (!availableFilters.hasNoSection && activeFilter === null) {
+      menu.addSeparator();
+      menu.addItem((item) => {
+        item.setTitle("No sections available").setDisabled(true);
+      });
+    }
+    menu.showAtMouseEvent(event);
   }
   captureScrollState() {
     const scrollTop = this.contentEl.scrollTop;
@@ -975,7 +1116,19 @@ var VaultTasksView = class extends import_obsidian.ItemView {
     this.registerDomEvent(headingEl, "contextmenu", (event) => {
       event.preventDefault();
       event.stopPropagation();
+      const activeSectionFilter = this.plugin.getSectionFilter();
       const menu = new import_obsidian.Menu();
+      menu.addItem((item) => {
+        item.setTitle("Show only this section").setIcon("filter").setChecked(
+          (activeSectionFilter == null ? void 0 : activeSectionFilter.kind) === "heading" && activeSectionFilter.heading === section.heading
+        ).onClick(() => {
+          void this.plugin.setSectionFilter({
+            kind: "heading",
+            heading: section.heading
+          });
+        });
+      });
+      menu.addSeparator();
       menu.addItem((item) => {
         item.setTitle("Complete all").setIcon("check").onClick(() => {
           void this.plugin.setTasksStatus(section.tasks, TASK_STATUS_DONE);
@@ -1093,7 +1246,9 @@ function buildRenderedDocument(snapshot, metadataCache, getBacklinkFiles) {
     if (snapshot.filter === "pending" && isDeferred(group.deferredUntil, today)) {
       continue;
     }
-    const visibleTasks = group.tasks.filter((task) => matchesFilter(task, snapshot.filter));
+    const visibleTasks = group.tasks.filter(
+      (task) => matchesFilter(task, snapshot.filter) && matchesSectionFilter(task, snapshot.sectionFilter)
+    );
     if (visibleTasks.length === 0) {
       continue;
     }
@@ -1136,7 +1291,7 @@ function buildRenderedDocument(snapshot, metadataCache, getBacklinkFiles) {
     sections.push("");
   }
   if (sections.length === 0) {
-    const emptyMessage = (_b = snapshot.error) != null ? _b : snapshot.filter === "all" ? "No tasks." : `No ${filterDescription(snapshot.filter)} tasks.`;
+    const emptyMessage = (_b = snapshot.error) != null ? _b : buildEmptyStateMessage(snapshot.filter, snapshot.sectionFilter);
     return {
       markdown: emptyMessage,
       renderedGroups,
@@ -1238,6 +1393,26 @@ function filterDescription(filter) {
       return "all";
   }
 }
+function getSectionFilterLabel(sectionFilter) {
+  if (!sectionFilter) {
+    return null;
+  }
+  if (sectionFilter.kind === "none") {
+    return "No section";
+  }
+  return sectionFilter.heading;
+}
+function buildEmptyStateMessage(filter, sectionFilter) {
+  const baseMessage = filter === "all" ? "No tasks." : `No ${filterDescription(filter)} tasks.`;
+  const sectionLabel = getSectionFilterLabel(sectionFilter);
+  if (!sectionLabel) {
+    return baseMessage;
+  }
+  if ((sectionFilter == null ? void 0 : sectionFilter.kind) === "none") {
+    return `${baseMessage.slice(0, -1)} without a section.`;
+  }
+  return `${baseMessage.slice(0, -1)} in ${sectionLabel}.`;
+}
 function getTodayDateString() {
   return formatDate(/* @__PURE__ */ new Date());
 }
@@ -1300,6 +1475,30 @@ function matchesFilter(task, filter) {
     default:
       return true;
   }
+}
+function matchesSectionFilter(task, sectionFilter) {
+  if (!sectionFilter) {
+    return true;
+  }
+  if (sectionFilter.kind === "none") {
+    return task.sectionHeading === null;
+  }
+  return task.sectionHeading === sectionFilter.heading;
+}
+function isSameSectionFilter(left, right) {
+  if (left === right) {
+    return true;
+  }
+  if (!left || !right || left.kind !== right.kind) {
+    return false;
+  }
+  if (left.kind === "none") {
+    return true;
+  }
+  if (right.kind === "none") {
+    return false;
+  }
+  return left.heading === right.heading;
 }
 function setTaskCompletion(rawLine, completed) {
   return setTaskStatusSymbol(rawLine, completed ? TASK_STATUS_DONE : TASK_STATUS_TODO);

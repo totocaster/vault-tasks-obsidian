@@ -33,6 +33,7 @@ const TASK_LINE_PATTERN = /^(\s*(?:[-*+]|\d+[.)])\s+\[)(.)(\].*)$/;
 const TASK_TEXT_PATTERN = /^\s*(?:[-*+]|\d+[.)])\s+\[.\]\s?(.*)$/;
 
 type TaskFilter = "all" | "pending" | "completed";
+type SectionFilter = { kind: "heading"; heading: string } | { kind: "none" } | null;
 
 interface TaskItem {
 	completed: boolean;
@@ -67,7 +68,13 @@ interface TaskSnapshot {
 	filter: TaskFilter;
 	groups: TaskGroup[];
 	refreshing: boolean;
+	sectionFilter: SectionFilter;
 	showConnections: boolean;
+}
+
+interface AvailableSectionFilters {
+	hasNoSection: boolean;
+	headings: string[];
 }
 
 interface ViewScrollAnchor {
@@ -90,6 +97,7 @@ export default class VaultTasksPlugin extends Plugin {
 	private manualRefreshRequired = false;
 	private queuedRefresh = false;
 	private refreshing = false;
+	private sectionFilter: SectionFilter = null;
 	private showConnections = false;
 	private readonly scheduleRefresh = debounce(() => {
 		void this.refreshIndex();
@@ -175,12 +183,17 @@ export default class VaultTasksPlugin extends Plugin {
 		return this.filter;
 	}
 
+	getSectionFilter(): SectionFilter {
+		return this.sectionFilter;
+	}
+
 	getSnapshot(): TaskSnapshot {
 		return {
 			error: this.lastError,
 			filter: this.filter,
 			groups: this.groups,
 			refreshing: this.refreshing,
+			sectionFilter: this.sectionFilter,
 			showConnections: this.showConnections,
 		};
 	}
@@ -214,6 +227,17 @@ export default class VaultTasksPlugin extends Plugin {
 		}
 
 		this.filter = filter;
+		await this.updateHeaderControls();
+		await this.renderAllViews();
+	}
+
+	async setSectionFilter(sectionFilter: SectionFilter): Promise<void> {
+		if (isSameSectionFilter(this.sectionFilter, sectionFilter)) {
+			return;
+		}
+
+		this.sectionFilter = sectionFilter;
+		await this.updateHeaderControls();
 		await this.renderAllViews();
 	}
 
@@ -225,6 +249,36 @@ export default class VaultTasksPlugin extends Plugin {
 		this.showConnections = showConnections;
 		await this.updateHeaderControls();
 		await this.renderAllViews();
+	}
+
+	getAvailableSectionFilters(filter: TaskFilter): AvailableSectionFilters {
+		const headings = new Set<string>();
+		let hasNoSection = false;
+		const today = getTodayDateString();
+
+		for (const group of this.groups) {
+			if (filter === "pending" && isDeferred(group.deferredUntil, today)) {
+				continue;
+			}
+
+			for (const task of group.tasks) {
+				if (!matchesFilter(task, filter)) {
+					continue;
+				}
+
+				if (task.sectionHeading === null) {
+					hasNoSection = true;
+					continue;
+				}
+
+				headings.add(task.sectionHeading);
+			}
+		}
+
+		return {
+			hasNoSection,
+			headings: Array.from(headings).sort((left, right) => left.localeCompare(right)),
+		};
 	}
 
 	async activateView(): Promise<void> {
@@ -606,6 +660,8 @@ class VaultTasksView extends ItemView {
 	private markdownHostEl: HTMLDivElement | null = null;
 	private renderComponent: Component | null = null;
 	private renderedTasks = new Map<string, TaskItem>();
+	private sectionFilterButtonEl: HTMLButtonElement | null = null;
+	private sectionFilterChipEl: HTMLButtonElement | null = null;
 
 	constructor(leaf: WorkspaceLeaf, private readonly plugin: VaultTasksPlugin) {
 		super(leaf);
@@ -722,6 +778,8 @@ class VaultTasksView extends ItemView {
 		this.renderedTasks.clear();
 		this.renderComponent?.unload();
 		this.renderComponent = null;
+		this.sectionFilterButtonEl = null;
+		this.sectionFilterChipEl = null;
 		this.contentEl.empty();
 	}
 
@@ -736,6 +794,7 @@ class VaultTasksView extends ItemView {
 
 		this.ensureHeaderFilters();
 		this.updateFilterButtons(snapshot.filter);
+		this.updateSectionFilterControls();
 		this.renderComponent?.unload();
 		this.renderComponent = new Component();
 		this.addChild(this.renderComponent);
@@ -820,6 +879,7 @@ class VaultTasksView extends ItemView {
 		this.updateArchiveButton();
 		this.updateConnectionsButton();
 		this.updateFilterButtons(this.plugin.getFilter());
+		this.updateSectionFilterControls();
 	}
 
 	private ensureHeaderFilters(): void {
@@ -858,6 +918,46 @@ class VaultTasksView extends ItemView {
 
 			this.filterButtons.set(filter, buttonEl);
 		}
+
+		filterEl.createSpan({
+			cls: "vault-tasks-view__header-separator",
+			attr: { "aria-hidden": "true" },
+		});
+
+		const sectionGroupEl = filterEl.createDiv({
+			cls: "vault-tasks-view__header-group",
+		});
+
+		const sectionFilterButtonEl = sectionGroupEl.createEl("button", {
+			cls: ["clickable-icon", "view-action", "vault-tasks-view__header-filter"],
+			attr: {
+				"data-tooltip-position": "bottom",
+				"aria-label": "Filter by section",
+				title: "Filter by section",
+				type: "button",
+			},
+		});
+		setIcon(sectionFilterButtonEl, "filter");
+
+		this.registerDomEvent(sectionFilterButtonEl, "click", (event) => {
+			this.showSectionFilterMenu(event);
+		});
+
+		this.sectionFilterButtonEl = sectionFilterButtonEl;
+
+		const sectionFilterChipEl = sectionGroupEl.createEl("button", {
+			cls: "vault-tasks-view__header-chip is-hidden",
+			attr: {
+				"data-tooltip-position": "bottom",
+				type: "button",
+			},
+		});
+
+		this.registerDomEvent(sectionFilterChipEl, "click", () => {
+			void this.plugin.setSectionFilter(null);
+		});
+
+		this.sectionFilterChipEl = sectionFilterChipEl;
 
 		filterEl.createSpan({
 			cls: "vault-tasks-view__header-separator",
@@ -929,6 +1029,34 @@ class VaultTasksView extends ItemView {
 		}
 	}
 
+	private updateSectionFilterControls(): void {
+		if (this.sectionFilterButtonEl) {
+			const hasSectionFilter = this.plugin.getSectionFilter() !== null;
+			this.sectionFilterButtonEl.toggleClass("is-active", hasSectionFilter);
+			this.sectionFilterButtonEl.setAttr("aria-pressed", hasSectionFilter ? "true" : "false");
+		}
+
+		if (!this.sectionFilterChipEl) {
+			return;
+		}
+
+		const sectionFilter = this.plugin.getSectionFilter();
+		const label = getSectionFilterLabel(sectionFilter);
+
+		if (!label) {
+			this.sectionFilterChipEl.addClass("is-hidden");
+			this.sectionFilterChipEl.empty();
+			this.sectionFilterChipEl.removeAttribute("aria-label");
+			this.sectionFilterChipEl.removeAttribute("title");
+			return;
+		}
+
+		this.sectionFilterChipEl.removeClass("is-hidden");
+		this.sectionFilterChipEl.setText(label);
+		this.sectionFilterChipEl.setAttr("aria-label", `Clear section filter: ${label}`);
+		this.sectionFilterChipEl.setAttr("title", `Clear section filter: ${label}`);
+	}
+
 	private updateArchiveButton(): void {
 		if (!this.archiveButtonEl) {
 			return;
@@ -949,6 +1077,66 @@ class VaultTasksView extends ItemView {
 
 		this.connectionsButtonEl.toggleClass("is-active", showConnections);
 		this.connectionsButtonEl.setAttr("aria-pressed", showConnections ? "true" : "false");
+	}
+
+	private showSectionFilterMenu(event: MouseEvent): void {
+		event.preventDefault();
+		event.stopPropagation();
+
+		const menu = new Menu();
+		const activeFilter = this.plugin.getSectionFilter();
+		const availableFilters = this.plugin.getAvailableSectionFilters(this.plugin.getFilter());
+
+		menu.addItem((item) => {
+			item
+				.setTitle("All sections")
+				.setIcon("list")
+				.setChecked(activeFilter === null)
+				.onClick(() => {
+					void this.plugin.setSectionFilter(null);
+				});
+		});
+
+		if (availableFilters.hasNoSection || activeFilter?.kind === "none") {
+			menu.addItem((item) => {
+				item
+					.setTitle("No section")
+					.setChecked(activeFilter?.kind === "none")
+					.onClick(() => {
+						void this.plugin.setSectionFilter({ kind: "none" });
+					});
+			});
+		}
+
+		const sectionHeadings = new Set(availableFilters.headings);
+		if (activeFilter?.kind === "heading") {
+			sectionHeadings.add(activeFilter.heading);
+		}
+
+		const sortedHeadings = Array.from(sectionHeadings).sort((left, right) =>
+			left.localeCompare(right),
+		);
+
+		if (sortedHeadings.length > 0) {
+			menu.addSeparator();
+			for (const heading of sortedHeadings) {
+				menu.addItem((item) => {
+					item
+						.setTitle(heading)
+						.setChecked(activeFilter?.kind === "heading" && activeFilter.heading === heading)
+						.onClick(() => {
+							void this.plugin.setSectionFilter({ kind: "heading", heading });
+						});
+				});
+			}
+		} else if (!availableFilters.hasNoSection && activeFilter === null) {
+			menu.addSeparator();
+			menu.addItem((item) => {
+				item.setTitle("No sections available").setDisabled(true);
+			});
+		}
+
+		menu.showAtMouseEvent(event);
 	}
 
 	private captureScrollState(): ViewScrollState {
@@ -1281,7 +1469,24 @@ class VaultTasksView extends ItemView {
 			event.preventDefault();
 			event.stopPropagation();
 
+			const activeSectionFilter = this.plugin.getSectionFilter();
 			const menu = new Menu();
+			menu.addItem((item) => {
+				item
+					.setTitle("Show only this section")
+					.setIcon("filter")
+					.setChecked(
+						activeSectionFilter?.kind === "heading" &&
+							activeSectionFilter.heading === section.heading,
+					)
+					.onClick(() => {
+						void this.plugin.setSectionFilter({
+							kind: "heading",
+							heading: section.heading,
+						});
+					});
+			});
+			menu.addSeparator();
 			menu.addItem((item) => {
 				item
 					.setTitle("Complete all")
@@ -1446,7 +1651,11 @@ function buildRenderedDocument(
 			continue;
 		}
 
-		const visibleTasks = group.tasks.filter((task) => matchesFilter(task, snapshot.filter));
+		const visibleTasks = group.tasks.filter(
+			(task) =>
+				matchesFilter(task, snapshot.filter) &&
+				matchesSectionFilter(task, snapshot.sectionFilter),
+		);
 
 		if (visibleTasks.length === 0) {
 			continue;
@@ -1507,7 +1716,7 @@ function buildRenderedDocument(
 	if (sections.length === 0) {
 		const emptyMessage =
 			snapshot.error ??
-			(snapshot.filter === "all" ? "No tasks." : `No ${filterDescription(snapshot.filter)} tasks.`);
+			buildEmptyStateMessage(snapshot.filter, snapshot.sectionFilter);
 
 		return {
 			markdown: emptyMessage,
@@ -1636,6 +1845,34 @@ function filterDescription(filter: TaskFilter): string {
 	}
 }
 
+function getSectionFilterLabel(sectionFilter: SectionFilter): string | null {
+	if (!sectionFilter) {
+		return null;
+	}
+
+	if (sectionFilter.kind === "none") {
+		return "No section";
+	}
+
+	return sectionFilter.heading;
+}
+
+function buildEmptyStateMessage(filter: TaskFilter, sectionFilter: SectionFilter): string {
+	const baseMessage =
+		filter === "all" ? "No tasks." : `No ${filterDescription(filter)} tasks.`;
+	const sectionLabel = getSectionFilterLabel(sectionFilter);
+
+	if (!sectionLabel) {
+		return baseMessage;
+	}
+
+	if (sectionFilter?.kind === "none") {
+		return `${baseMessage.slice(0, -1)} without a section.`;
+	}
+
+	return `${baseMessage.slice(0, -1)} in ${sectionLabel}.`;
+}
+
 function getTodayDateString(): string {
 	return formatDate(new Date());
 }
@@ -1717,6 +1954,38 @@ function matchesFilter(task: TaskItem, filter: TaskFilter): boolean {
 		default:
 			return true;
 	}
+}
+
+function matchesSectionFilter(task: TaskItem, sectionFilter: SectionFilter): boolean {
+	if (!sectionFilter) {
+		return true;
+	}
+
+	if (sectionFilter.kind === "none") {
+		return task.sectionHeading === null;
+	}
+
+	return task.sectionHeading === sectionFilter.heading;
+}
+
+function isSameSectionFilter(left: SectionFilter, right: SectionFilter): boolean {
+	if (left === right) {
+		return true;
+	}
+
+	if (!left || !right || left.kind !== right.kind) {
+		return false;
+	}
+
+	if (left.kind === "none") {
+		return true;
+	}
+
+	if (right.kind === "none") {
+		return false;
+	}
+
+	return left.heading === right.heading;
 }
 
 function setTaskCompletion(rawLine: string, completed: boolean): string | null {

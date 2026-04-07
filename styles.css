@@ -53,6 +53,37 @@
 	outline-offset: 2px;
 }
 
+.vault-tasks-view__header-chip {
+	display: inline-flex;
+	align-items: center;
+	max-width: 20ch;
+	padding: 0 var(--size-4-2);
+	border: 0;
+	border-radius: var(--radius-s);
+	background: var(--background-modifier-hover);
+	box-shadow: none;
+	color: var(--text-muted);
+	font-size: var(--font-ui-small);
+	line-height: var(--line-height-normal);
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	cursor: pointer;
+}
+
+.vault-tasks-view__header-chip.is-hidden {
+	display: none;
+}
+
+.vault-tasks-view__header-chip:hover {
+	color: var(--text-normal);
+}
+
+.vault-tasks-view__header-chip:focus-visible {
+	outline: 2px solid var(--background-modifier-border-focus);
+	outline-offset: 2px;
+}
+
 .vault-tasks-view__task-jump {
 	display: inline;
 	margin: 0 0 0 var(--size-4-1);
