@@ -13,15 +13,18 @@ import {
 	Modal,
 	Notice,
 	Plugin,
+	PluginSettingTab,
 	Setting,
 	setIcon,
 	TFile,
 	WorkspaceLeaf,
+	normalizePath,
 } from "obsidian";
 
 const VIEW_TYPE_TASKS = "vault-tasks-view";
 const VIEW_TITLE = "Vault tasks";
-const DEFERRED_UNTIL_KEY = "deffered-until";
+const DEFERRED_UNTIL_KEY = "deferred-until";
+const LEGACY_DEFERRED_UNTIL_KEY = "deffered-until";
 const HIDDEN_FROM_TASKS_KEY = "hide-from-vault-tasks";
 const TASK_STATUS_CANCELLED = "-";
 const TASK_STATUS_DEFERRED = ">";
@@ -33,7 +36,75 @@ const TASK_LINE_PATTERN = /^(\s*(?:[-*+]|\d+[.)])\s+\[)(.)(\].*)$/;
 const TASK_TEXT_PATTERN = /^\s*(?:[-*+]|\d+[.)])\s+\[.\]\s?(.*)$/;
 
 type TaskFilter = "all" | "pending" | "completed";
+type TaskViewLocation = "main" | "sidebar";
+type TaskStatusMode = "standard" | "extended";
+type PendingMode = "todo-only" | "todo-and-in-progress";
+type NoteSortMode =
+	| "title-asc"
+	| "title-desc"
+	| "path-asc"
+	| "path-desc"
+	| "task-count-desc"
+	| "task-count-asc";
+type SectionSortMode = "source" | "heading-asc" | "heading-desc";
+type TaskSortMode = "source" | "text-asc" | "text-desc" | "status-source";
 type SectionFilter = { kind: "heading"; heading: string } | { kind: "none" } | null;
+
+interface VaultTasksSettings {
+	defaultFilter: TaskFilter;
+	excludeFolders: string[];
+	includeCancelledInCompleted: boolean;
+	includeFolders: string[];
+	openLocation: TaskViewLocation;
+	pendingMode: PendingMode;
+	persistSectionFilter: boolean;
+	savedSectionFilter: SectionFilter;
+	sectionSort: SectionSortMode;
+	showConnectionsByDefault: boolean;
+	showSectionHeadings: boolean;
+	statusMode: TaskStatusMode;
+	taskSort: TaskSortMode;
+	noteSort: NoteSortMode;
+}
+
+const DEFAULT_SETTINGS: VaultTasksSettings = {
+	defaultFilter: "pending",
+	excludeFolders: [],
+	includeCancelledInCompleted: true,
+	includeFolders: [],
+	openLocation: "main",
+	pendingMode: "todo-and-in-progress",
+	persistSectionFilter: false,
+	savedSectionFilter: null,
+	sectionSort: "source",
+	showConnectionsByDefault: false,
+	showSectionHeadings: true,
+	statusMode: "extended",
+	taskSort: "source",
+	noteSort: "title-asc",
+};
+
+const NOTE_SORT_LABELS: Record<NoteSortMode, string> = {
+	"title-asc": "Title (A-Z)",
+	"title-desc": "Title (Z-A)",
+	"path-asc": "Path (A-Z)",
+	"path-desc": "Path (Z-A)",
+	"task-count-desc": "Visible task count (high-low)",
+	"task-count-asc": "Visible task count (low-high)",
+};
+
+const SECTION_SORT_LABELS: Record<SectionSortMode, string> = {
+	source: "Source order",
+	"heading-asc": "Heading (A-Z)",
+	"heading-desc": "Heading (Z-A)",
+};
+
+const TASK_SORT_LABELS: Record<TaskSortMode, string> = {
+	source: "Source order",
+	"text-asc": "Task text (A-Z)",
+	"text-desc": "Task text (Z-A)",
+	"status-source": "Status, then source order",
+};
 
 interface TaskItem {
 	completed: boolean;
@@ -69,12 +140,24 @@ interface TaskSnapshot {
 	groups: TaskGroup[];
 	refreshing: boolean;
 	sectionFilter: SectionFilter;
+	settings: VaultTasksSettings;
 	showConnections: boolean;
+}
+
+interface VisibleTaskGroup {
+	group: TaskGroup;
+	tasks: TaskItem[];
 }
 
 interface AvailableSectionFilters {
 	hasNoSection: boolean;
 	headings: string[];
+}
+
+interface RenderSectionBucket {
+	heading: string | null;
+	line: number;
+	tasks: TaskItem[];
 }
 
 interface ViewScrollAnchor {
@@ -98,13 +181,16 @@ export default class VaultTasksPlugin extends Plugin {
 	private queuedRefresh = false;
 	private refreshing = false;
 	private sectionFilter: SectionFilter = null;
+	private settings: VaultTasksSettings = DEFAULT_SETTINGS;
 	private showConnections = false;
 	private readonly scheduleRefresh = debounce(() => {
 		void this.refreshIndex();
 	}, 250, true);
 
 	async onload(): Promise<void> {
+		await this.loadSettings();
 		this.registerView(VIEW_TYPE_TASKS, (leaf) => new VaultTasksView(leaf, this));
+		this.addSettingTab(new VaultTasksSettingTab(this.app, this));
 
 		this.addRibbonIcon("list-todo", "Open task list", () => {
 			void this.activateView();
@@ -179,8 +265,26 @@ export default class VaultTasksPlugin extends Plugin {
 		});
 	}
 
+	private async loadSettings(): Promise<void> {
+		const loadedSettings = await this.loadData();
+		this.settings = normalizeSettings(loadedSettings);
+		this.filter = this.settings.defaultFilter;
+		this.showConnections = this.settings.showConnectionsByDefault;
+		this.sectionFilter = this.settings.persistSectionFilter
+			? this.settings.savedSectionFilter
+			: null;
+	}
+
+	private async saveSettings(): Promise<void> {
+		await this.saveData(this.settings);
+	}
+
 	getFilter(): TaskFilter {
 		return this.filter;
+	}
+
+	getSettings(): VaultTasksSettings {
+		return this.settings;
 	}
 
 	getSectionFilter(): SectionFilter {
@@ -194,6 +298,7 @@ export default class VaultTasksPlugin extends Plugin {
 			groups: this.groups,
 			refreshing: this.refreshing,
 			sectionFilter: this.sectionFilter,
+			settings: this.settings,
 			showConnections: this.showConnections,
 		};
 	}
@@ -212,6 +317,23 @@ export default class VaultTasksPlugin extends Plugin {
 
 	hasPendingManualRefresh(): boolean {
 		return this.manualRefreshRequired;
+	}
+
+	async updateSettings(settingsPatch: Partial<VaultTasksSettings>): Promise<void> {
+		this.settings = {
+			...this.settings,
+			...settingsPatch,
+		};
+		await this.saveSettings();
+	}
+
+	async rerenderViews(): Promise<void> {
+		await this.updateHeaderControls();
+		await this.renderAllViews();
+	}
+
+	async rebuildIndex(): Promise<void> {
+		await this.refreshIndex();
 	}
 
 	async applyTaskChanges(): Promise<void> {
@@ -237,6 +359,13 @@ export default class VaultTasksPlugin extends Plugin {
 		}
 
 		this.sectionFilter = sectionFilter;
+		if (this.settings.persistSectionFilter) {
+			this.settings = {
+				...this.settings,
+				savedSectionFilter: sectionFilter,
+			};
+			await this.saveSettings();
+		}
 		await this.updateHeaderControls();
 		await this.renderAllViews();
 	}
@@ -262,7 +391,7 @@ export default class VaultTasksPlugin extends Plugin {
 			}
 
 			for (const task of group.tasks) {
-				if (!matchesFilter(task, filter)) {
+				if (!matchesFilter(task, filter, this.settings)) {
 					continue;
 				}
 
@@ -282,10 +411,13 @@ export default class VaultTasksPlugin extends Plugin {
 	}
 
 	async activateView(): Promise<void> {
-		let leaf = this.getMainTaskLeaf();
+		let leaf = this.app.workspace.getLeavesOfType(VIEW_TYPE_TASKS)[0] ?? null;
 
 		if (!leaf) {
-			leaf = this.app.workspace.getLeaf("tab");
+			leaf =
+				(this.settings.openLocation === "sidebar"
+					? this.app.workspace.getRightLeaf(false)
+					: this.app.workspace.getLeaf("tab")) ?? this.app.workspace.getLeaf("tab");
 			await leaf.setViewState({
 				type: VIEW_TYPE_TASKS,
 				active: true,
@@ -347,7 +479,7 @@ export default class VaultTasksPlugin extends Plugin {
 
 			const nextLine = setTaskStatusSymbol(task.rawLine, statusSymbol);
 			if (nextLine !== null) {
-				task.completed = isCompletedTaskStatus(statusSymbol);
+				task.completed = isCheckboxCheckedStatus(statusSymbol);
 				task.rawLine = nextLine;
 				task.renderedLine = nextLine.trimStart();
 				task.statusSymbol = statusSymbol;
@@ -400,6 +532,7 @@ export default class VaultTasksPlugin extends Plugin {
 		try {
 			await this.app.fileManager.processFrontMatter(file, (frontmatter) => {
 				frontmatter[DEFERRED_UNTIL_KEY] = deferredUntil;
+				delete frontmatter[LEGACY_DEFERRED_UNTIL_KEY];
 			});
 			await this.refreshIndex();
 		} catch (error) {
@@ -517,6 +650,10 @@ export default class VaultTasksPlugin extends Plugin {
 
 	private async buildTaskGroups(): Promise<TaskGroup[]> {
 		const taskFiles = this.app.vault.getMarkdownFiles().flatMap((file) => {
+			if (!matchesFolderScope(file.path, this.settings)) {
+				return [];
+			}
+
 			const cache = this.app.metadataCache.getFileCache(file);
 			const taskItems = getTaskListItems(cache);
 
@@ -549,21 +686,7 @@ export default class VaultTasksPlugin extends Plugin {
 
 		return groups
 			.filter((group) => group.tasks.length > 0 && !group.hiddenFromTaskList)
-			.sort((left, right) => left.noteTitle.localeCompare(right.noteTitle));
-	}
-
-	private getMainTaskLeaf(): WorkspaceLeaf | null {
-		let taskLeaf: WorkspaceLeaf | null = null;
-
-		this.app.workspace.iterateRootLeaves((leaf) => {
-			if (taskLeaf || leaf.view.getViewType() !== VIEW_TYPE_TASKS) {
-				return;
-			}
-
-			taskLeaf = leaf;
-		});
-
-		return taskLeaf;
+			.sort((left, right) => left.file.path.localeCompare(right.file.path));
 	}
 
 	private isMarkdownFile(file: unknown): file is TFile {
@@ -583,6 +706,7 @@ export default class VaultTasksPlugin extends Plugin {
 			if (
 				sourceFile instanceof TFile &&
 				sourceFile.extension === "md" &&
+				matchesFolderScope(sourceFile.path, this.settings) &&
 				!isHiddenFromTaskListFrontmatter(this.app.metadataCache.getFileCache(sourceFile)?.frontmatter)
 			) {
 				backlinks.set(sourceFile.path, sourceFile);
@@ -1336,13 +1460,19 @@ class VaultTasksView extends ItemView {
 		});
 		menu.addSeparator();
 
-		const statusActions: Array<{ title: string; icon: string; symbol: string }> = [
-			{ title: "Todo", icon: "circle", symbol: TASK_STATUS_TODO },
-			{ title: "In progress", icon: "loader", symbol: TASK_STATUS_IN_PROGRESS },
-			{ title: "Done", icon: "check", symbol: TASK_STATUS_DONE },
-			{ title: "Cancelled", icon: "minus", symbol: TASK_STATUS_CANCELLED },
-			{ title: "Deferred", icon: "fast-forward", symbol: TASK_STATUS_DEFERRED },
-		];
+		const statusActions: Array<{ title: string; icon: string; symbol: string }> =
+			this.plugin.getSettings().statusMode === "standard"
+				? [
+						{ title: "Todo", icon: "circle", symbol: TASK_STATUS_TODO },
+						{ title: "Done", icon: "check", symbol: TASK_STATUS_DONE },
+					]
+				: [
+						{ title: "Todo", icon: "circle", symbol: TASK_STATUS_TODO },
+						{ title: "In progress", icon: "loader", symbol: TASK_STATUS_IN_PROGRESS },
+						{ title: "Done", icon: "check", symbol: TASK_STATUS_DONE },
+						{ title: "Cancelled", icon: "minus", symbol: TASK_STATUS_CANCELLED },
+						{ title: "Deferred", icon: "fast-forward", symbol: TASK_STATUS_DEFERRED },
+					];
 
 			for (const statusAction of statusActions) {
 				menu.addItem((item) => {
@@ -1425,16 +1555,18 @@ class VaultTasksView extends ItemView {
 						void this.plugin.setTasksStatus(group.tasks, TASK_STATUS_DONE);
 					});
 			});
-			menu.addItem((item) => {
-				item
-					.setTitle("Cancel pending")
-					.setIcon("minus")
-					.onClick(() => {
-						void this.plugin.setTasksStatus(group.tasks, TASK_STATUS_CANCELLED, {
-							onlyUnchecked: true,
+			if (this.plugin.getSettings().statusMode === "extended") {
+				menu.addItem((item) => {
+					item
+						.setTitle("Cancel pending")
+						.setIcon("minus")
+						.onClick(() => {
+							void this.plugin.setTasksStatus(group.tasks, TASK_STATUS_CANCELLED, {
+								onlyUnchecked: true,
+							});
 						});
-					});
-			});
+				});
+			}
 			menu.addSeparator();
 			menu.addItem((item) => {
 				item
@@ -1495,16 +1627,18 @@ class VaultTasksView extends ItemView {
 						void this.plugin.setTasksStatus(section.tasks, TASK_STATUS_DONE);
 					});
 			});
-			menu.addItem((item) => {
-				item
-					.setTitle("Cancel pending")
-					.setIcon("minus")
-					.onClick(() => {
-						void this.plugin.setTasksStatus(section.tasks, TASK_STATUS_CANCELLED, {
-							onlyUnchecked: true,
+			if (this.plugin.getSettings().statusMode === "extended") {
+				menu.addItem((item) => {
+					item
+						.setTitle("Cancel pending")
+						.setIcon("minus")
+						.onClick(() => {
+							void this.plugin.setTasksStatus(section.tasks, TASK_STATUS_CANCELLED, {
+								onlyUnchecked: true,
+							});
 						});
-					});
-			});
+				});
+			}
 			menu.showAtMouseEvent(event);
 		});
 	}
@@ -1546,6 +1680,218 @@ class VaultTasksView extends ItemView {
 
 			return;
 		}
+	}
+}
+
+class VaultTasksSettingTab extends PluginSettingTab {
+	constructor(app: VaultTasksPlugin["app"], private readonly plugin: VaultTasksPlugin) {
+		super(app, plugin);
+	}
+
+	display(): void {
+		const { containerEl } = this;
+		const settings = this.plugin.getSettings();
+
+		containerEl.empty();
+
+		new Setting(containerEl).setName("View defaults").setHeading();
+
+		new Setting(containerEl)
+			.setName("Open location")
+			.setDesc("Choose where the task view opens when a new leaf is created.")
+			.addDropdown((component) => {
+				component
+					.addOption("main", "Main tab")
+					.addOption("sidebar", "Right sidebar")
+					.setValue(settings.openLocation)
+					.onChange(async (value) => {
+						await this.plugin.updateSettings({
+							openLocation: normalizeTaskViewLocation(value),
+						});
+					});
+			});
+
+		new Setting(containerEl)
+			.setName("Default filter")
+			.setDesc("Choose which task filter the view starts with.")
+			.addDropdown((component) => {
+				component
+					.addOption("pending", "Pending")
+					.addOption("all", "All")
+					.addOption("completed", "Completed")
+					.setValue(settings.defaultFilter)
+					.onChange(async (value) => {
+						const defaultFilter = normalizeTaskFilter(value);
+						await this.plugin.updateSettings({ defaultFilter });
+						await this.plugin.setFilter(defaultFilter);
+					});
+			});
+
+		new Setting(containerEl)
+			.setName("Show related notes by default")
+			.setDesc("Show backlink context under note titles when the view opens.")
+			.addToggle((component) => {
+				component.setValue(settings.showConnectionsByDefault).onChange(async (value) => {
+					await this.plugin.updateSettings({
+						showConnectionsByDefault: value,
+					});
+					await this.plugin.setShowConnections(value);
+				});
+			});
+
+		new Setting(containerEl)
+			.setName("Show section headings")
+			.setDesc("Render source headings inside each note group.")
+			.addToggle((component) => {
+				component.setValue(settings.showSectionHeadings).onChange(async (value) => {
+					await this.plugin.updateSettings({
+						showSectionHeadings: value,
+					});
+					await this.plugin.rerenderViews();
+				});
+			});
+
+		new Setting(containerEl)
+			.setName("Remember section filter")
+			.setDesc("Restore the last selected section filter when Obsidian restarts.")
+			.addToggle((component) => {
+				component.setValue(settings.persistSectionFilter).onChange(async (value) => {
+					await this.plugin.updateSettings({
+						persistSectionFilter: value,
+						savedSectionFilter: value ? this.plugin.getSectionFilter() : null,
+					});
+				});
+			});
+
+		new Setting(containerEl).setName("Tasks").setHeading();
+
+		new Setting(containerEl)
+			.setName("Task status actions")
+			.setDesc("Choose whether task menus use only standard Markdown states or extended states.")
+			.addDropdown((component) => {
+				component
+					.addOption("standard", "Standard Markdown")
+					.addOption("extended", "Extended statuses")
+					.setValue(settings.statusMode)
+					.onChange(async (value) => {
+						await this.plugin.updateSettings({
+							statusMode: normalizeTaskStatusMode(value),
+						});
+						await this.plugin.rerenderViews();
+					});
+			});
+
+		new Setting(containerEl)
+			.setName("Pending filter")
+			.setDesc("Choose whether in-progress tasks appear in the pending view.")
+			.addDropdown((component) => {
+				component
+					.addOption("todo-only", "[ ] only")
+					.addOption("todo-and-in-progress", "[ ] and [/]")
+					.setValue(settings.pendingMode)
+					.onChange(async (value) => {
+						await this.plugin.updateSettings({
+							pendingMode: normalizePendingMode(value),
+						});
+						await this.plugin.rerenderViews();
+					});
+			});
+
+		new Setting(containerEl)
+			.setName("Include cancelled in completed")
+			.setDesc("Show cancelled tasks in the completed view.")
+			.addToggle((component) => {
+				component.setValue(settings.includeCancelledInCompleted).onChange(async (value) => {
+					await this.plugin.updateSettings({
+						includeCancelledInCompleted: value,
+					});
+					await this.plugin.rerenderViews();
+				});
+			});
+
+		new Setting(containerEl).setName("Scope").setHeading();
+
+		new Setting(containerEl)
+			.setName("Include folders")
+			.setDesc("One folder per line. Leave empty to include the whole vault.")
+			.addTextArea((component) => {
+				component.setValue(formatFolderList(settings.includeFolders));
+				component.inputEl.rows = 4;
+				component.inputEl.addEventListener("change", () => {
+					void (async () => {
+						await this.plugin.updateSettings({
+							includeFolders: parseFolderListInput(component.inputEl.value),
+						});
+						await this.plugin.rebuildIndex();
+					})();
+				});
+			});
+
+		new Setting(containerEl)
+			.setName("Exclude folders")
+			.setDesc("One folder per line. Excluded folders always win.")
+			.addTextArea((component) => {
+				component.setValue(formatFolderList(settings.excludeFolders));
+				component.inputEl.rows = 4;
+				component.inputEl.addEventListener("change", () => {
+					void (async () => {
+						await this.plugin.updateSettings({
+							excludeFolders: parseFolderListInput(component.inputEl.value),
+						});
+						await this.plugin.rebuildIndex();
+					})();
+				});
+			});
+
+		new Setting(containerEl).setName("Sorting").setHeading();
+
+		new Setting(containerEl)
+			.setName("Sort notes by")
+			.setDesc("Choose how note groups are ordered in the task view.")
+			.addDropdown((component) => {
+				for (const [value, label] of Object.entries(NOTE_SORT_LABELS)) {
+					component.addOption(value, label);
+				}
+
+				component.setValue(settings.noteSort).onChange(async (value) => {
+					await this.plugin.updateSettings({
+						noteSort: normalizeNoteSortMode(value),
+					});
+					await this.plugin.rerenderViews();
+				});
+			});
+
+		new Setting(containerEl)
+			.setName("Sort sections by")
+			.setDesc("Choose how section groups are ordered inside each note.")
+			.addDropdown((component) => {
+				for (const [value, label] of Object.entries(SECTION_SORT_LABELS)) {
+					component.addOption(value, label);
+				}
+
+				component.setValue(settings.sectionSort).onChange(async (value) => {
+					await this.plugin.updateSettings({
+						sectionSort: normalizeSectionSortMode(value),
+					});
+					await this.plugin.rerenderViews();
+				});
+			});
+
+		new Setting(containerEl)
+			.setName("Sort tasks by")
+			.setDesc("Choose how tasks are ordered within each section.")
+			.addDropdown((component) => {
+				for (const [value, label] of Object.entries(TASK_SORT_LABELS)) {
+					component.addOption(value, label);
+				}
+
+				component.setValue(settings.taskSort).onChange(async (value) => {
+					await this.plugin.updateSettings({
+						taskSort: normalizeTaskSortMode(value),
+					});
+					await this.plugin.rerenderViews();
+				});
+			});
 	}
 }
 
@@ -1645,22 +1991,11 @@ function buildRenderedDocument(
 	const renderedSections: TaskSectionGroup[] = [];
 	const renderedTasks: TaskItem[] = [];
 	const today = getTodayDateString();
+	const visibleGroups = getVisibleTaskGroups(snapshot, today);
+	sortVisibleTaskGroups(visibleGroups, snapshot.settings.noteSort);
 
-	for (const group of snapshot.groups) {
-		if (snapshot.filter === "pending" && isDeferred(group.deferredUntil, today)) {
-			continue;
-		}
-
-		const visibleTasks = group.tasks.filter(
-			(task) =>
-				matchesFilter(task, snapshot.filter) &&
-				matchesSectionFilter(task, snapshot.sectionFilter),
-		);
-
-		if (visibleTasks.length === 0) {
-			continue;
-		}
-
+	for (const visibleGroup of visibleGroups) {
+		const { group, tasks } = visibleGroup;
 		const linkText = escapeWikiLinkText(metadataCache.fileToLinktext(group.file, "/", true));
 		const noteTitle = escapeWikiLinkText(group.noteTitle);
 
@@ -1679,35 +2014,29 @@ function buildRenderedDocument(
 			}
 		}
 
-		let currentSectionKey: string | null = null;
-		let currentSection: TaskSectionGroup | null = null;
+		const sectionBuckets = buildRenderSectionBuckets(tasks);
+		sortRenderSectionBuckets(sectionBuckets, snapshot.settings.sectionSort);
 
-		for (const task of visibleTasks) {
-			const sectionKey =
-				task.sectionHeading !== null && task.sectionLine !== null
-					? `${task.sectionLine}:${task.sectionHeading}`
-					: null;
+		for (const sectionBucket of sectionBuckets) {
+			sortTasks(sectionBucket.tasks, snapshot.settings.taskSort);
 
-			if (sectionKey !== currentSectionKey) {
-				currentSectionKey = sectionKey;
-
-				if (task.sectionHeading !== null) {
-					sections.push(`### ${task.sectionHeading}`);
-					currentSection = {
-						file: group.file,
-						heading: task.sectionHeading,
-						line: task.sectionLine ?? task.line,
-						tasks: [],
-					};
-					renderedSections.push(currentSection);
-				} else {
-					currentSection = null;
-				}
+			let renderedSection: TaskSectionGroup | null = null;
+			if (snapshot.settings.showSectionHeadings && sectionBucket.heading !== null) {
+				sections.push(`### ${sectionBucket.heading}`);
+				renderedSection = {
+					file: group.file,
+					heading: sectionBucket.heading,
+					line: sectionBucket.line,
+					tasks: [],
+				};
+				renderedSections.push(renderedSection);
 			}
 
-			sections.push(task.renderedLine);
-			currentSection?.tasks.push(task);
-			renderedTasks.push(task);
+			for (const task of sectionBucket.tasks) {
+				sections.push(task.renderedLine);
+				renderedSection?.tasks.push(task);
+				renderedTasks.push(task);
+			}
 		}
 
 		sections.push("");
@@ -1750,6 +2079,64 @@ function buildConnectionsLine(
 	return `<span class="vault-tasks-view__connections-label">Related to:</span> ${renderedLinks.join(", ")}`;
 }
 
+function getVisibleTaskGroups(snapshot: TaskSnapshot, today: string): VisibleTaskGroup[] {
+	const visibleGroups: VisibleTaskGroup[] = [];
+
+	for (const group of snapshot.groups) {
+		if (snapshot.filter === "pending" && isDeferred(group.deferredUntil, today)) {
+			continue;
+		}
+
+		const visibleTasks = group.tasks.filter(
+			(task) =>
+				matchesFilter(task, snapshot.filter, snapshot.settings) &&
+				matchesSectionFilter(task, snapshot.sectionFilter),
+		);
+
+		if (visibleTasks.length === 0) {
+			continue;
+		}
+
+		visibleGroups.push({
+			group,
+			tasks: [...visibleTasks],
+		});
+	}
+
+	return visibleGroups;
+}
+
+function buildRenderSectionBuckets(tasks: TaskItem[]): RenderSectionBucket[] {
+	const buckets: RenderSectionBucket[] = [];
+	let currentBucket: RenderSectionBucket | null = null;
+	let currentBucketKey: string | null = null;
+
+	for (const task of tasks) {
+		const bucketKey =
+			task.sectionHeading !== null && task.sectionLine !== null
+				? `${task.sectionLine}:${task.sectionHeading}`
+				: "__none__";
+
+		if (bucketKey !== currentBucketKey) {
+			currentBucketKey = bucketKey;
+			currentBucket = {
+				heading: task.sectionHeading,
+				line: task.sectionLine ?? task.line,
+				tasks: [],
+			};
+			buckets.push(currentBucket);
+		}
+
+		if (!currentBucket) {
+			continue;
+		}
+
+		currentBucket.tasks.push(task);
+	}
+
+	return buckets;
+}
+
 function buildTaskItem(
 	file: TFile,
 	taskItem: ListItemCache,
@@ -1772,7 +2159,7 @@ function buildTaskItem(
 	const statusSymbol = normalizeTaskStatusSymbol(taskItem.task);
 
 	return {
-		completed: isCompletedTaskStatus(statusSymbol),
+		completed: isCheckboxCheckedStatus(statusSymbol),
 		file,
 		key: `${file.path}:${line}`,
 		line,
@@ -1805,7 +2192,10 @@ function extractTaskText(rawLine: string): string | null {
 }
 
 function extractDeferredUntil(content: string): string | null {
-	return normalizeDeferredUntil(extractFrontmatterValue(content, DEFERRED_UNTIL_KEY));
+	return normalizeDeferredUntil(
+		extractFrontmatterValue(content, DEFERRED_UNTIL_KEY) ??
+			extractFrontmatterValue(content, LEGACY_DEFERRED_UNTIL_KEY),
+	);
 }
 
 function extractHiddenFromTaskList(content: string): boolean {
@@ -1945,12 +2335,12 @@ function getHeadingCaches(cache: CachedMetadata | null): HeadingCache[] {
 	);
 }
 
-function matchesFilter(task: TaskItem, filter: TaskFilter): boolean {
+function matchesFilter(task: TaskItem, filter: TaskFilter, settings: VaultTasksSettings): boolean {
 	switch (filter) {
 		case "pending":
-			return isPendingTaskStatus(task.statusSymbol);
+			return isPendingTaskStatus(task.statusSymbol, settings);
 		case "completed":
-			return isCompletedTaskStatus(task.statusSymbol);
+			return isCompletedTaskStatus(task.statusSymbol, settings);
 		default:
 			return true;
 	}
@@ -2172,14 +2562,19 @@ function isCheckboxCheckedStatus(statusSymbol: string): boolean {
 	return statusSymbol !== TASK_STATUS_TODO;
 }
 
-function isCompletedTaskStatus(statusSymbol: string): boolean {
-	return statusSymbol === TASK_STATUS_DONE || statusSymbol === "X" || statusSymbol === TASK_STATUS_CANCELLED;
+function isCompletedTaskStatus(statusSymbol: string, settings: VaultTasksSettings): boolean {
+	return (
+		statusSymbol === TASK_STATUS_DONE ||
+		statusSymbol === "X" ||
+		(settings.includeCancelledInCompleted && statusSymbol === TASK_STATUS_CANCELLED)
+	);
 }
 
-function isPendingTaskStatus(statusSymbol: string): boolean {
+function isPendingTaskStatus(statusSymbol: string, settings: VaultTasksSettings): boolean {
 	return (
 		statusSymbol === TASK_STATUS_TODO ||
-		statusSymbol === TASK_STATUS_IN_PROGRESS
+		(settings.pendingMode === "todo-and-in-progress" &&
+			statusSymbol === TASK_STATUS_IN_PROGRESS)
 	);
 }
 
@@ -2195,6 +2590,276 @@ function normalizeTaskStatusSymbol(statusSymbol: string | undefined): string {
 		default:
 			return statusSymbol || TASK_STATUS_TODO;
 	}
+}
+
+function normalizeSettings(value: unknown): VaultTasksSettings {
+	const candidate = isObjectRecord(value) ? value : {};
+	const defaultFilter = normalizeTaskFilter(candidate.defaultFilter);
+	const persistSectionFilter = candidate.persistSectionFilter === true;
+
+	return {
+		defaultFilter,
+		excludeFolders: normalizeFolderList(candidate.excludeFolders),
+		includeCancelledInCompleted:
+			typeof candidate.includeCancelledInCompleted === "boolean"
+				? candidate.includeCancelledInCompleted
+				: DEFAULT_SETTINGS.includeCancelledInCompleted,
+		includeFolders: normalizeFolderList(candidate.includeFolders),
+		openLocation: normalizeTaskViewLocation(candidate.openLocation),
+		pendingMode: normalizePendingMode(candidate.pendingMode),
+		persistSectionFilter,
+		savedSectionFilter: persistSectionFilter
+			? normalizeSectionFilter(candidate.savedSectionFilter)
+			: null,
+		sectionSort: normalizeSectionSortMode(candidate.sectionSort),
+		showConnectionsByDefault:
+			typeof candidate.showConnectionsByDefault === "boolean"
+				? candidate.showConnectionsByDefault
+				: DEFAULT_SETTINGS.showConnectionsByDefault,
+		showSectionHeadings:
+			typeof candidate.showSectionHeadings === "boolean"
+				? candidate.showSectionHeadings
+				: DEFAULT_SETTINGS.showSectionHeadings,
+		statusMode: normalizeTaskStatusMode(candidate.statusMode),
+		taskSort: normalizeTaskSortMode(candidate.taskSort),
+		noteSort: normalizeNoteSortMode(candidate.noteSort),
+	};
+}
+
+function matchesFolderScope(path: string, settings: VaultTasksSettings): boolean {
+	const normalizedPath = normalizePath(path);
+	const hasIncludedFolder =
+		settings.includeFolders.length === 0 ||
+		settings.includeFolders.some((folder) => isPathInFolder(normalizedPath, folder));
+
+	if (!hasIncludedFolder) {
+		return false;
+	}
+
+	return !settings.excludeFolders.some((folder) => isPathInFolder(normalizedPath, folder));
+}
+
+function isPathInFolder(path: string, folder: string): boolean {
+	return path === folder || path.startsWith(`${folder}/`);
+}
+
+function sortVisibleTaskGroups(visibleGroups: VisibleTaskGroup[], noteSort: NoteSortMode): void {
+	visibleGroups.sort((left, right) => compareVisibleTaskGroups(left, right, noteSort));
+}
+
+function compareVisibleTaskGroups(
+	left: VisibleTaskGroup,
+	right: VisibleTaskGroup,
+	noteSort: NoteSortMode,
+): number {
+	switch (noteSort) {
+		case "title-desc":
+			return compareStrings(right.group.noteTitle, left.group.noteTitle, left.group.file.path, right.group.file.path);
+		case "path-asc":
+			return compareStrings(left.group.file.path, right.group.file.path, left.group.noteTitle, right.group.noteTitle);
+		case "path-desc":
+			return compareStrings(right.group.file.path, left.group.file.path, left.group.noteTitle, right.group.noteTitle);
+		case "task-count-desc":
+			return (
+				right.tasks.length - left.tasks.length ||
+				compareStrings(left.group.noteTitle, right.group.noteTitle, left.group.file.path, right.group.file.path)
+			);
+		case "task-count-asc":
+			return (
+				left.tasks.length - right.tasks.length ||
+				compareStrings(left.group.noteTitle, right.group.noteTitle, left.group.file.path, right.group.file.path)
+			);
+		case "title-asc":
+		default:
+			return compareStrings(left.group.noteTitle, right.group.noteTitle, left.group.file.path, right.group.file.path);
+	}
+}
+
+function sortRenderSectionBuckets(
+	sectionBuckets: RenderSectionBucket[],
+	sectionSort: SectionSortMode,
+): void {
+	sectionBuckets.sort((left, right) => {
+		if (left.heading === null && right.heading === null) {
+			return left.line - right.line;
+		}
+
+		if (left.heading === null) {
+			return -1;
+		}
+
+		if (right.heading === null) {
+			return 1;
+		}
+
+		switch (sectionSort) {
+			case "heading-asc":
+				return compareStrings(left.heading, right.heading, String(left.line), String(right.line));
+			case "heading-desc":
+				return compareStrings(right.heading, left.heading, String(left.line), String(right.line));
+			case "source":
+			default:
+				return left.line - right.line || left.heading.localeCompare(right.heading);
+		}
+	});
+}
+
+function sortTasks(tasks: TaskItem[], taskSort: TaskSortMode): void {
+	tasks.sort((left, right) => compareTasks(left, right, taskSort));
+}
+
+function compareTasks(left: TaskItem, right: TaskItem, taskSort: TaskSortMode): number {
+	switch (taskSort) {
+		case "text-asc":
+			return compareStrings(left.text, right.text, String(left.line), String(right.line));
+		case "text-desc":
+			return compareStrings(right.text, left.text, String(left.line), String(right.line));
+		case "status-source":
+			return (
+				getTaskStatusSortRank(left.statusSymbol) - getTaskStatusSortRank(right.statusSymbol) ||
+				left.line - right.line ||
+				left.text.localeCompare(right.text)
+			);
+		case "source":
+		default:
+			return left.line - right.line || left.text.localeCompare(right.text);
+	}
+}
+
+function getTaskStatusSortRank(statusSymbol: string): number {
+	switch (statusSymbol) {
+		case TASK_STATUS_TODO:
+			return 0;
+		case TASK_STATUS_IN_PROGRESS:
+			return 1;
+		case TASK_STATUS_DEFERRED:
+			return 2;
+		case TASK_STATUS_DONE:
+		case "X":
+			return 3;
+		case TASK_STATUS_CANCELLED:
+			return 4;
+		default:
+			return 5;
+	}
+}
+
+function compareStrings(
+	left: string,
+	right: string,
+	leftFallback: string,
+	rightFallback: string,
+): number {
+	return left.localeCompare(right) || leftFallback.localeCompare(rightFallback);
+}
+
+function normalizeTaskFilter(value: unknown): TaskFilter {
+	return value === "all" || value === "completed" || value === "pending"
+		? value
+		: DEFAULT_SETTINGS.defaultFilter;
+}
+
+function normalizeTaskViewLocation(value: unknown): TaskViewLocation {
+	return value === "sidebar" || value === "main" ? value : DEFAULT_SETTINGS.openLocation;
+}
+
+function normalizeTaskStatusMode(value: unknown): TaskStatusMode {
+	return value === "standard" || value === "extended" ? value : DEFAULT_SETTINGS.statusMode;
+}
+
+function normalizePendingMode(value: unknown): PendingMode {
+	return value === "todo-only" || value === "todo-and-in-progress"
+		? value
+		: DEFAULT_SETTINGS.pendingMode;
+}
+
+function normalizeNoteSortMode(value: unknown): NoteSortMode {
+	switch (value) {
+		case "title-asc":
+		case "title-desc":
+		case "path-asc":
+		case "path-desc":
+		case "task-count-desc":
+		case "task-count-asc":
+			return value;
+		default:
+			return DEFAULT_SETTINGS.noteSort;
+	}
+}
+
+function normalizeSectionSortMode(value: unknown): SectionSortMode {
+	return value === "source" || value === "heading-asc" || value === "heading-desc"
+		? value
+		: DEFAULT_SETTINGS.sectionSort;
+}
+
+function normalizeTaskSortMode(value: unknown): TaskSortMode {
+	return value === "source" ||
+		value === "text-asc" ||
+		value === "text-desc" ||
+		value === "status-source"
+		? value
+		: DEFAULT_SETTINGS.taskSort;
+}
+
+function normalizeSectionFilter(value: unknown): SectionFilter {
+	if (!isObjectRecord(value) || typeof value.kind !== "string") {
+		return null;
+	}
+
+	if (value.kind === "none") {
+		return { kind: "none" };
+	}
+
+	if (value.kind === "heading" && typeof value.heading === "string" && value.heading.trim().length > 0) {
+		return {
+			kind: "heading",
+			heading: value.heading.trim(),
+		};
+	}
+
+	return null;
+}
+
+function normalizeFolderList(value: unknown): string[] {
+	if (!Array.isArray(value)) {
+		return [];
+	}
+
+	return Array.from(
+		new Set(
+			value
+				.filter((entry): entry is string => typeof entry === "string")
+				.map((entry) => normalizeFolderPath(entry))
+				.filter((entry) => entry.length > 0),
+		),
+	);
+}
+
+function parseFolderListInput(value: string): string[] {
+	return normalizeFolderList(
+		value
+			.split(/\r?\n|,/)
+			.map((entry) => entry.trim())
+			.filter((entry) => entry.length > 0),
+	);
+}
+
+function formatFolderList(folders: string[]): string {
+	return folders.join("\n");
+}
+
+function normalizeFolderPath(path: string): string {
+	let normalizedPath = normalizePath(path.trim());
+	while (normalizedPath.endsWith("/")) {
+		normalizedPath = normalizedPath.slice(0, -1);
+	}
+
+	return normalizedPath === "." ? "" : normalizedPath;
+}
+
+function isObjectRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null;
 }
 
 const DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;

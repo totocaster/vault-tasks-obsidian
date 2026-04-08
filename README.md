@@ -25,7 +25,7 @@ The view is designed to feel like normal Obsidian reading view:
 
 The plugin currently recognizes these note-level keys:
 
-- `deffered-until: YYYY-MM-DD`
+- `deferred-until: YYYY-MM-DD`
 - `hide-from-vault-tasks: true`
 
 ## Development
