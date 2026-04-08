@@ -3,6 +3,9 @@ import {
 	NOTE_SORT_LABELS,
 	SECTION_SORT_LABELS,
 	TASK_SORT_LABELS,
+} from "./config";
+import {
+	formatFolderList,
 	normalizeNoteSortMode,
 	normalizePendingMode,
 	normalizeSectionSortMode,
@@ -10,8 +13,8 @@ import {
 	normalizeTaskSortMode,
 	normalizeTaskStatusMode,
 	normalizeTaskViewLocation,
-} from "./config";
-import { formatFolderList, parseFolderListInput } from "./lib/settings";
+	parseFolderListInput,
+} from "./lib/settings";
 import type VaultTasksPlugin from "./plugin";
 
 export class VaultTasksSettingTab extends PluginSettingTab {

@@ -1,11 +1,8 @@
 import type {
 	NoteSortMode,
-	PendingMode,
 	SectionSortMode,
 	TaskFilter,
 	TaskSortMode,
-	TaskStatusMode,
-	TaskViewLocation,
 	VaultTasksSettings,
 } from "./types";
 
@@ -95,53 +92,4 @@ export function filterDescription(filter: TaskFilter): string {
 		default:
 			return "all";
 	}
-}
-
-export function normalizeTaskFilter(value: unknown): TaskFilter {
-	return value === "all" || value === "completed" || value === "pending"
-		? value
-		: DEFAULT_SETTINGS.defaultFilter;
-}
-
-export function normalizeTaskViewLocation(value: unknown): TaskViewLocation {
-	return value === "sidebar" || value === "main" ? value : DEFAULT_SETTINGS.openLocation;
-}
-
-export function normalizeTaskStatusMode(value: unknown): TaskStatusMode {
-	return value === "standard" || value === "extended" ? value : DEFAULT_SETTINGS.statusMode;
-}
-
-export function normalizePendingMode(value: unknown): PendingMode {
-	return value === "todo-only" || value === "todo-and-in-progress"
-		? value
-		: DEFAULT_SETTINGS.pendingMode;
-}
-
-export function normalizeNoteSortMode(value: unknown): NoteSortMode {
-	switch (value) {
-		case "title-asc":
-		case "title-desc":
-		case "path-asc":
-		case "path-desc":
-		case "task-count-desc":
-		case "task-count-asc":
-			return value;
-		default:
-			return DEFAULT_SETTINGS.noteSort;
-	}
-}
-
-export function normalizeSectionSortMode(value: unknown): SectionSortMode {
-	return value === "source" || value === "heading-asc" || value === "heading-desc"
-		? value
-		: DEFAULT_SETTINGS.sectionSort;
-}
-
-export function normalizeTaskSortMode(value: unknown): TaskSortMode {
-	return value === "source" ||
-		value === "text-asc" ||
-		value === "text-desc" ||
-		value === "status-source"
-		? value
-		: DEFAULT_SETTINGS.taskSort;
 }

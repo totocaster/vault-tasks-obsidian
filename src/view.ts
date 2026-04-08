@@ -20,10 +20,8 @@ import {
 	VIEW_TYPE_TASKS,
 } from "./config";
 import { DeferUntilModal } from "./defer-until-modal";
-import {
-	buildRenderedDocument,
-	isCheckboxCheckedStatus,
-} from "./logic";
+import { isCheckboxCheckedStatus } from "./lib/filtering";
+import { buildRenderedDocument } from "./logic";
 import type {
 	TaskFilter,
 	TaskGroup,
