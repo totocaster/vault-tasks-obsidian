@@ -49,7 +49,7 @@ export function matchesFolderScope(path: string, settings: VaultTasksSettings): 
 	return !settings.excludeFolders.some((folder) => isPathInFolder(normalizedPath, folder));
 }
 
-export function isPathInFolder(path: string, folder: string): boolean {
+function isPathInFolder(path: string, folder: string): boolean {
 	return path === folder || path.startsWith(`${folder}/`);
 }
 
@@ -106,7 +106,7 @@ export function normalizeTaskSortMode(value: unknown): VaultTasksSettings["taskS
 		: DEFAULT_SETTINGS.taskSort;
 }
 
-export function normalizeSectionFilter(value: unknown): SectionFilter {
+function normalizeSectionFilter(value: unknown): SectionFilter {
 	if (!isObjectRecord(value) || typeof value.kind !== "string") {
 		return null;
 	}
@@ -140,7 +140,7 @@ export function normalizeFolderList(value: unknown): string[] {
 	);
 }
 
-export function normalizeNotePathList(value: unknown): string[] {
+function normalizeNotePathList(value: unknown): string[] {
 	if (!Array.isArray(value)) {
 		return [];
 	}
@@ -168,7 +168,7 @@ export function formatFolderList(folders: string[]): string {
 	return folders.join("\n");
 }
 
-export function normalizeFolderPath(path: string): string {
+function normalizeFolderPath(path: string): string {
 	return path
 		.replace(/\\/g, "/")
 		.trim()
@@ -177,6 +177,6 @@ export function normalizeFolderPath(path: string): string {
 		.replace(/\/$/, "");
 }
 
-export function isObjectRecord(value: unknown): value is Record<string, unknown> {
+function isObjectRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null;
 }

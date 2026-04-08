@@ -1090,7 +1090,7 @@ var VaultTasksView = class extends import_obsidian3.ItemView {
       }
       event.preventDefault();
       event.stopPropagation();
-      this.showTaskMenu(event, listItemEl, task);
+      this.showTaskMenu(event, task);
     });
     await this.render();
   }
@@ -1597,7 +1597,7 @@ var VaultTasksView = class extends import_obsidian3.ItemView {
       this.applyTaskStatusToElement(listItemEl, task);
     }
   }
-  showTaskMenu(event, listItemEl, task) {
+  showTaskMenu(event, task) {
     const menu = new import_obsidian3.Menu();
     menu.addItem((item) => {
       item.setTitle("Open source").setIcon("file-text").onClick(() => {

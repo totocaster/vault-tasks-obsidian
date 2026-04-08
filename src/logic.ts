@@ -131,11 +131,11 @@ export function buildRenderedDocument(
 	};
 }
 
-export function buildDeferredUntilLine(deferredUntil: string): string {
+function buildDeferredUntilLine(deferredUntil: string): string {
 	return `<span class="vault-tasks-view__deferred-label">Deferred until:</span> ${deferredUntil}`;
 }
 
-export function buildConnectionsLine(
+function buildConnectionsLine(
 	backlinks: TFile[],
 	metadataCache: VaultTasksMetadataCache,
 ): string {
@@ -147,7 +147,7 @@ export function buildConnectionsLine(
 	return `<span class="vault-tasks-view__connections-label">Related to:</span> ${renderedLinks.join(", ")}`;
 }
 
-export function getVisibleTaskGroups(
+function getVisibleTaskGroups(
 	snapshot: TaskSnapshot,
 	today: string,
 ): VisibleTaskGroup[] {
@@ -177,7 +177,7 @@ export function getVisibleTaskGroups(
 	return visibleGroups;
 }
 
-export function buildRenderSectionBuckets(tasks: TaskItem[]): RenderSectionBucket[] {
+function buildRenderSectionBuckets(tasks: TaskItem[]): RenderSectionBucket[] {
 	const buckets: RenderSectionBucket[] = [];
 	let currentBucket: RenderSectionBucket | null = null;
 	let currentBucketKey: string | null = null;

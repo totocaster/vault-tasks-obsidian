@@ -57,7 +57,7 @@ export function normalizeFrontmatterBoolean(value: unknown): boolean | null {
 	}
 }
 
-export function unquoteFrontmatterValue(value: string | null): string {
+function unquoteFrontmatterValue(value: string | null): string {
 	if (value === null) {
 		return "";
 	}

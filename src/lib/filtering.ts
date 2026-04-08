@@ -7,7 +7,7 @@ import {
 import { filterDescription } from "../config";
 import type { SectionFilter, TaskFilter, TaskItem, VaultTasksSettings } from "../types";
 
-export function getSectionFilterLabel(sectionFilter: SectionFilter): string | null {
+function getSectionFilterLabel(sectionFilter: SectionFilter): string | null {
 	if (!sectionFilter) {
 		return null;
 	}

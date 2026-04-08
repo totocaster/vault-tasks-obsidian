@@ -24,7 +24,7 @@ export function sortVisibleTaskGroups(
 	);
 }
 
-export function compareVisibleTaskGroups(
+function compareVisibleTaskGroups(
 	left: VisibleTaskGroup,
 	right: VisibleTaskGroup,
 	noteSort: NoteSortMode,
@@ -135,7 +135,7 @@ export function sortTasks(tasks: TaskItem[], taskSort: TaskSortMode): void {
 	tasks.sort((left, right) => compareTasks(left, right, taskSort));
 }
 
-export function compareTasks(left: TaskItem, right: TaskItem, taskSort: TaskSortMode): number {
+function compareTasks(left: TaskItem, right: TaskItem, taskSort: TaskSortMode): number {
 	switch (taskSort) {
 		case "text-asc":
 			return compareStrings(left.text, right.text, String(left.line), String(right.line));
@@ -153,7 +153,7 @@ export function compareTasks(left: TaskItem, right: TaskItem, taskSort: TaskSort
 	}
 }
 
-export function getTaskStatusSortRank(statusSymbol: string): number {
+function getTaskStatusSortRank(statusSymbol: string): number {
 	switch (statusSymbol) {
 		case TASK_STATUS_TODO:
 			return 0;
@@ -171,7 +171,7 @@ export function getTaskStatusSortRank(statusSymbol: string): number {
 	}
 }
 
-export function compareStrings(
+function compareStrings(
 	left: string,
 	right: string,
 	leftFallback: string,

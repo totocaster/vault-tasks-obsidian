@@ -3,7 +3,6 @@ import {
 	ItemView,
 	Keymap,
 	MarkdownRenderer,
-	MarkdownView,
 	Menu,
 	setIcon,
 	type WorkspaceLeaf,
@@ -142,7 +141,7 @@ export class VaultTasksView extends ItemView {
 
 			event.preventDefault();
 			event.stopPropagation();
-			this.showTaskMenu(event, listItemEl, task);
+			this.showTaskMenu(event, task);
 		});
 
 		await this.render();
@@ -800,7 +799,7 @@ export class VaultTasksView extends ItemView {
 		}
 	}
 
-	private showTaskMenu(event: MouseEvent, listItemEl: HTMLElement, task: TaskItem): void {
+	private showTaskMenu(event: MouseEvent, task: TaskItem): void {
 		const menu = new Menu();
 		menu.addItem((item) => {
 			item
