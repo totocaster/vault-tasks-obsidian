@@ -679,6 +679,28 @@ export class VaultTasksView extends ItemView {
 		});
 		const isPinned = this.plugin.isNotePinned(group.file);
 
+		if (isPinned && this.plugin.canMovePinnedNote(group.file, "up")) {
+			this.createHeadingAction(actionsEl, {
+				ariaLabel: `Move ${group.noteTitle} up`,
+				icon: "arrow-up",
+				onClick: async () => {
+					await this.plugin.movePinnedNote(group.file, "up");
+				},
+				title: "Move pinned note up",
+			});
+		}
+
+		if (isPinned && this.plugin.canMovePinnedNote(group.file, "down")) {
+			this.createHeadingAction(actionsEl, {
+				ariaLabel: `Move ${group.noteTitle} down`,
+				icon: "arrow-down",
+				onClick: async () => {
+					await this.plugin.movePinnedNote(group.file, "down");
+				},
+				title: "Move pinned note down",
+			});
+		}
+
 		this.createHeadingAction(actionsEl, {
 			alwaysVisible: isPinned,
 			ariaLabel: isPinned ? `Unpin ${group.noteTitle}` : `Pin ${group.noteTitle}`,
@@ -694,30 +716,6 @@ export class VaultTasksView extends ItemView {
 			},
 			title: isPinned ? "Unpin note" : "Pin note",
 		});
-
-		if (!isPinned) {
-			return;
-		}
-
-		this.createHeadingAction(actionsEl, {
-			ariaLabel: `Move ${group.noteTitle} up`,
-			disabled: !this.plugin.canMovePinnedNote(group.file, "up"),
-			icon: "arrow-up",
-			onClick: async () => {
-				await this.plugin.movePinnedNote(group.file, "up");
-			},
-			title: "Move pinned note up",
-		});
-
-		this.createHeadingAction(actionsEl, {
-			ariaLabel: `Move ${group.noteTitle} down`,
-			disabled: !this.plugin.canMovePinnedNote(group.file, "down"),
-			icon: "arrow-down",
-			onClick: async () => {
-				await this.plugin.movePinnedNote(group.file, "down");
-			},
-			title: "Move pinned note down",
-		});
 	}
 
 	private createHeadingAction(
@@ -725,7 +723,6 @@ export class VaultTasksView extends ItemView {
 		options: {
 			alwaysVisible?: boolean;
 			ariaLabel: string;
-			disabled?: boolean;
 			icon: string;
 			isPinned?: boolean;
 			onClick: () => Promise<void>;
@@ -748,13 +745,6 @@ export class VaultTasksView extends ItemView {
 
 		if (options.isPinned) {
 			actionEl.addClass("is-pinned");
-		}
-
-		if (options.disabled) {
-			actionEl.addClass("is-disabled");
-			actionEl.setAttr("aria-disabled", "true");
-			containerEl.appendChild(actionEl);
-			return;
 		}
 
 		actionEl.setAttr("role", "button");

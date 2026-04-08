@@ -167,21 +167,10 @@
 	pointer-events: auto;
 }
 
-.vault-tasks-view__note-action.is-disabled {
-	opacity: 0.3;
-	pointer-events: none;
-}
-
 .vault-tasks-view__note-heading-block:hover .vault-tasks-view__note-action,
 .vault-tasks-view__note-heading-block:focus-within .vault-tasks-view__note-action {
 	opacity: 1;
 	pointer-events: auto;
-}
-
-.vault-tasks-view__note-heading-block:hover .vault-tasks-view__note-action.is-disabled,
-.vault-tasks-view__note-heading-block:focus-within .vault-tasks-view__note-action.is-disabled {
-	opacity: 0.3;
-	pointer-events: none;
 }
 
 .vault-tasks-view__note-action:hover {
