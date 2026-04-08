@@ -687,6 +687,20 @@ export class VaultTasksView extends ItemView {
 		listItemEl.setAttr("data-task", task.statusSymbol);
 	}
 
+	private applyTaskStatusesToRenderedTasks(tasks: TaskItem[]): void {
+		for (const task of tasks) {
+			const listItemEl = this.contentEl.querySelector<HTMLElement>(
+				`li[data-task-key="${CSS.escape(task.key)}"]`,
+			);
+
+			if (!listItemEl) {
+				continue;
+			}
+
+			this.applyTaskStatusToElement(listItemEl, task);
+		}
+	}
+
 	private showTaskMenu(event: MouseEvent, listItemEl: HTMLElement, task: TaskItem): void {
 		const menu = new Menu();
 		menu.addItem((item) => {
@@ -756,7 +770,7 @@ export class VaultTasksView extends ItemView {
 								return;
 							}
 
-							this.applyTaskStatusToElement(listItemEl, task);
+							this.applyTaskStatusesToRenderedTasks([task]);
 						})();
 					});
 			});
@@ -815,7 +829,13 @@ export class VaultTasksView extends ItemView {
 					.setTitle("Complete all")
 					.setIcon("check")
 					.onClick(() => {
-						void this.plugin.setTasksStatus(group.tasks, TASK_STATUS_DONE);
+						void (async () => {
+							const updatedTasks = await this.plugin.setTasksStatus(
+								group.tasks,
+								TASK_STATUS_DONE,
+							);
+							this.applyTaskStatusesToRenderedTasks(updatedTasks);
+						})();
 					});
 			});
 			if (this.plugin.getSettings().statusMode === "extended") {
@@ -824,9 +844,16 @@ export class VaultTasksView extends ItemView {
 						.setTitle("Cancel pending")
 						.setIcon("minus")
 						.onClick(() => {
-							void this.plugin.setTasksStatus(group.tasks, TASK_STATUS_CANCELLED, {
-								onlyUnchecked: true,
-							});
+							void (async () => {
+								const updatedTasks = await this.plugin.setTasksStatus(
+									group.tasks,
+									TASK_STATUS_CANCELLED,
+									{
+										onlyUnchecked: true,
+									},
+								);
+								this.applyTaskStatusesToRenderedTasks(updatedTasks);
+							})();
 						});
 				});
 			}
@@ -887,7 +914,13 @@ export class VaultTasksView extends ItemView {
 					.setTitle("Complete all")
 					.setIcon("check")
 					.onClick(() => {
-						void this.plugin.setTasksStatus(section.tasks, TASK_STATUS_DONE);
+						void (async () => {
+							const updatedTasks = await this.plugin.setTasksStatus(
+								section.tasks,
+								TASK_STATUS_DONE,
+							);
+							this.applyTaskStatusesToRenderedTasks(updatedTasks);
+						})();
 					});
 			});
 			if (this.plugin.getSettings().statusMode === "extended") {
@@ -896,9 +929,16 @@ export class VaultTasksView extends ItemView {
 						.setTitle("Cancel pending")
 						.setIcon("minus")
 						.onClick(() => {
-							void this.plugin.setTasksStatus(section.tasks, TASK_STATUS_CANCELLED, {
-								onlyUnchecked: true,
-							});
+							void (async () => {
+								const updatedTasks = await this.plugin.setTasksStatus(
+									section.tasks,
+									TASK_STATUS_CANCELLED,
+									{
+										onlyUnchecked: true,
+									},
+								);
+								this.applyTaskStatusesToRenderedTasks(updatedTasks);
+							})();
 						});
 				});
 			}

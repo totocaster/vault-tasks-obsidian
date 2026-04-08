@@ -416,6 +416,7 @@ function findTaskSection(taskLine, headings) {
 function updateSpecificTasksInEditor(editor, tasks, statusSymbol, options) {
   const lines = collectEditorLines(editor);
   let updatedCount = 0;
+  const updatedTasks = [];
   for (const task of tasks) {
     const targetLine = findTaskLine(lines, task);
     if (targetLine === null) {
@@ -436,8 +437,12 @@ function updateSpecificTasksInEditor(editor, tasks, statusSymbol, options) {
     lines[targetLine] = nextLine;
     editor.setLine(targetLine, nextLine);
     updatedCount += 1;
+    updatedTasks.push(task);
   }
-  return updatedCount;
+  return {
+    updatedCount,
+    updatedTasks
+  };
 }
 function updateTaskStatusInContent(content, task, statusSymbol) {
   const newline = content.includes("\r\n") ? "\r\n" : "\n";
@@ -457,6 +462,7 @@ function updateSpecificTasksInContent(content, tasks, statusSymbol, options) {
   const newline = content.includes("\r\n") ? "\r\n" : "\n";
   const lines = content.split(/\r?\n/);
   let updatedCount = 0;
+  const updatedTasks = [];
   for (const task of tasks) {
     const targetLine = findTaskLine(lines, task);
     if (targetLine === null) {
@@ -476,10 +482,12 @@ function updateSpecificTasksInContent(content, tasks, statusSymbol, options) {
     }
     lines[targetLine] = nextLine;
     updatedCount += 1;
+    updatedTasks.push(task);
   }
   return {
     content: lines.join(newline),
-    updatedCount
+    updatedCount,
+    updatedTasks
   };
 }
 function isCheckboxCheckedStatus(statusSymbol) {
@@ -1544,6 +1552,17 @@ var VaultTasksView = class extends import_obsidian4.ItemView {
     }
     listItemEl.setAttr("data-task", task.statusSymbol);
   }
+  applyTaskStatusesToRenderedTasks(tasks) {
+    for (const task of tasks) {
+      const listItemEl = this.contentEl.querySelector(
+        `li[data-task-key="${CSS.escape(task.key)}"]`
+      );
+      if (!listItemEl) {
+        continue;
+      }
+      this.applyTaskStatusToElement(listItemEl, task);
+    }
+  }
   showTaskMenu(event, listItemEl, task) {
     const menu = new import_obsidian4.Menu();
     menu.addItem((item) => {
@@ -1586,7 +1605,7 @@ var VaultTasksView = class extends import_obsidian4.ItemView {
             if (!didUpdate) {
               return;
             }
-            this.applyTaskStatusToElement(listItemEl, task);
+            this.applyTaskStatusesToRenderedTasks([task]);
           })();
         });
       });
@@ -1626,15 +1645,28 @@ var VaultTasksView = class extends import_obsidian4.ItemView {
       menu.addSeparator();
       menu.addItem((item) => {
         item.setTitle("Complete all").setIcon("check").onClick(() => {
-          void this.plugin.setTasksStatus(group.tasks, TASK_STATUS_DONE);
+          void (async () => {
+            const updatedTasks = await this.plugin.setTasksStatus(
+              group.tasks,
+              TASK_STATUS_DONE
+            );
+            this.applyTaskStatusesToRenderedTasks(updatedTasks);
+          })();
         });
       });
       if (this.plugin.getSettings().statusMode === "extended") {
         menu.addItem((item) => {
           item.setTitle("Cancel pending").setIcon("minus").onClick(() => {
-            void this.plugin.setTasksStatus(group.tasks, TASK_STATUS_CANCELLED, {
-              onlyUnchecked: true
-            });
+            void (async () => {
+              const updatedTasks = await this.plugin.setTasksStatus(
+                group.tasks,
+                TASK_STATUS_CANCELLED,
+                {
+                  onlyUnchecked: true
+                }
+              );
+              this.applyTaskStatusesToRenderedTasks(updatedTasks);
+            })();
           });
         });
       }
@@ -1679,15 +1711,28 @@ var VaultTasksView = class extends import_obsidian4.ItemView {
       menu.addSeparator();
       menu.addItem((item) => {
         item.setTitle("Complete all").setIcon("check").onClick(() => {
-          void this.plugin.setTasksStatus(section.tasks, TASK_STATUS_DONE);
+          void (async () => {
+            const updatedTasks = await this.plugin.setTasksStatus(
+              section.tasks,
+              TASK_STATUS_DONE
+            );
+            this.applyTaskStatusesToRenderedTasks(updatedTasks);
+          })();
         });
       });
       if (this.plugin.getSettings().statusMode === "extended") {
         menu.addItem((item) => {
           item.setTitle("Cancel pending").setIcon("minus").onClick(() => {
-            void this.plugin.setTasksStatus(section.tasks, TASK_STATUS_CANCELLED, {
-              onlyUnchecked: true
-            });
+            void (async () => {
+              const updatedTasks = await this.plugin.setTasksStatus(
+                section.tasks,
+                TASK_STATUS_CANCELLED,
+                {
+                  onlyUnchecked: true
+                }
+              );
+              this.applyTaskStatusesToRenderedTasks(updatedTasks);
+            })();
           });
         });
       }
@@ -2055,42 +2100,61 @@ var VaultTasksPlugin = class extends import_obsidian5.Plugin {
   async setTasksStatus(tasks, statusSymbol, options) {
     var _a;
     if (tasks.length === 0) {
-      return;
+      return [];
     }
     let updatedCount = 0;
+    let updatedTasks = [];
     const { onlyUnchecked = false } = options != null ? options : {};
     const file = tasks[0].file;
     try {
       this.autoRefreshPaused = true;
       const activeView = this.app.workspace.getActiveViewOfType(import_obsidian5.MarkdownView);
       if (((_a = activeView == null ? void 0 : activeView.file) == null ? void 0 : _a.path) === file.path) {
-        updatedCount = updateSpecificTasksInEditor(activeView.editor, tasks, statusSymbol, {
+        const result = updateSpecificTasksInEditor(activeView.editor, tasks, statusSymbol, {
           onlyUnchecked
         });
+        updatedCount = result.updatedCount;
+        updatedTasks = result.updatedTasks;
       } else {
         await this.app.vault.process(file, (content) => {
           const result = updateSpecificTasksInContent(content, tasks, statusSymbol, {
             onlyUnchecked
           });
           updatedCount = result.updatedCount;
+          updatedTasks = result.updatedTasks;
           return result.content;
         });
       }
-      this.autoRefreshPaused = false;
-      this.manualRefreshRequired = false;
-      await this.updateHeaderControls();
       if (updatedCount === 0) {
+        if (!this.manualRefreshRequired) {
+          this.autoRefreshPaused = false;
+        }
+        await this.updateHeaderControls();
         new import_obsidian5.Notice(
           statusSymbol === TASK_STATUS_CANCELLED ? "No pending tasks to cancel." : "No tasks needed updating."
         );
-        return;
+        return [];
       }
-      await this.refreshIndex();
+      for (const task of updatedTasks) {
+        const nextLine = setTaskStatusSymbol(task.rawLine, statusSymbol);
+        if (nextLine === null) {
+          continue;
+        }
+        task.rawLine = nextLine;
+        task.renderedLine = nextLine.trimStart();
+        task.statusSymbol = statusSymbol;
+      }
+      this.manualRefreshRequired = true;
+      await this.updateHeaderControls();
+      return updatedTasks;
     } catch (error) {
-      this.autoRefreshPaused = false;
       const message = error instanceof Error ? error.message : "Could not update the selected tasks.";
       new import_obsidian5.Notice(message);
+      if (!this.manualRefreshRequired) {
+        this.autoRefreshPaused = false;
+      }
       await this.updateHeaderControls();
+      return [];
     }
   }
   async buildTaskGroups() {

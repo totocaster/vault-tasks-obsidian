@@ -426,12 +426,13 @@ export default class VaultTasksPlugin extends Plugin {
 		tasks: TaskItem[],
 		statusSymbol: string,
 		options?: { onlyUnchecked?: boolean },
-	): Promise<void> {
+	): Promise<TaskItem[]> {
 		if (tasks.length === 0) {
-			return;
+			return [];
 		}
 
 		let updatedCount = 0;
+		let updatedTasks: TaskItem[] = [];
 		const { onlyUnchecked = false } = options ?? {};
 		const file = tasks[0].file;
 
@@ -440,39 +441,58 @@ export default class VaultTasksPlugin extends Plugin {
 			const activeView = this.app.workspace.getActiveViewOfType(MarkdownView);
 
 			if (activeView?.file?.path === file.path) {
-				updatedCount = updateSpecificTasksInEditor(activeView.editor, tasks, statusSymbol, {
+				const result = updateSpecificTasksInEditor(activeView.editor, tasks, statusSymbol, {
 					onlyUnchecked,
 				});
+				updatedCount = result.updatedCount;
+				updatedTasks = result.updatedTasks;
 			} else {
 				await this.app.vault.process(file, (content) => {
 					const result = updateSpecificTasksInContent(content, tasks, statusSymbol, {
 						onlyUnchecked,
 					});
 					updatedCount = result.updatedCount;
+					updatedTasks = result.updatedTasks;
 					return result.content;
 				});
 			}
 
-			this.autoRefreshPaused = false;
-			this.manualRefreshRequired = false;
-			await this.updateHeaderControls();
-
 			if (updatedCount === 0) {
+				if (!this.manualRefreshRequired) {
+					this.autoRefreshPaused = false;
+				}
+				await this.updateHeaderControls();
 				new Notice(
 					statusSymbol === TASK_STATUS_CANCELLED
 						? "No pending tasks to cancel."
 						: "No tasks needed updating.",
 				);
-				return;
+				return [];
 			}
 
-			await this.refreshIndex();
+			for (const task of updatedTasks) {
+				const nextLine = setTaskStatusSymbol(task.rawLine, statusSymbol);
+				if (nextLine === null) {
+					continue;
+				}
+
+				task.rawLine = nextLine;
+				task.renderedLine = nextLine.trimStart();
+				task.statusSymbol = statusSymbol;
+			}
+
+			this.manualRefreshRequired = true;
+			await this.updateHeaderControls();
+			return updatedTasks;
 		} catch (error) {
-			this.autoRefreshPaused = false;
 			const message =
 				error instanceof Error ? error.message : "Could not update the selected tasks.";
 			new Notice(message);
+			if (!this.manualRefreshRequired) {
+				this.autoRefreshPaused = false;
+			}
 			await this.updateHeaderControls();
+			return [];
 		}
 	}
 

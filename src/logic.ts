@@ -454,9 +454,10 @@ export function updateSpecificTasksInEditor(
 	tasks: TaskItem[],
 	statusSymbol: string,
 	options?: { onlyUnchecked?: boolean },
-): number {
+): { updatedCount: number; updatedTasks: TaskItem[] } {
 	const lines = collectEditorLines(editor);
 	let updatedCount = 0;
+	const updatedTasks: TaskItem[] = [];
 
 	for (const task of tasks) {
 		const targetLine = findTaskLine(lines, task);
@@ -483,9 +484,13 @@ export function updateSpecificTasksInEditor(
 		lines[targetLine] = nextLine;
 		editor.setLine(targetLine, nextLine);
 		updatedCount += 1;
+		updatedTasks.push(task);
 	}
 
-	return updatedCount;
+	return {
+		updatedCount,
+		updatedTasks,
+	};
 }
 
 export function updateTaskStatusInContent(
@@ -515,10 +520,11 @@ export function updateSpecificTasksInContent(
 	tasks: TaskItem[],
 	statusSymbol: string,
 	options?: { onlyUnchecked?: boolean },
-): { content: string; updatedCount: number } {
+): { content: string; updatedCount: number; updatedTasks: TaskItem[] } {
 	const newline = content.includes("\r\n") ? "\r\n" : "\n";
 	const lines = content.split(/\r?\n/);
 	let updatedCount = 0;
+	const updatedTasks: TaskItem[] = [];
 
 	for (const task of tasks) {
 		const targetLine = findTaskLine(lines, task);
@@ -544,11 +550,13 @@ export function updateSpecificTasksInContent(
 
 		lines[targetLine] = nextLine;
 		updatedCount += 1;
+		updatedTasks.push(task);
 	}
 
 	return {
 		content: lines.join(newline),
 		updatedCount,
+		updatedTasks,
 	};
 }
 
