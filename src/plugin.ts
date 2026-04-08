@@ -1,4 +1,12 @@
-import { debounce, MarkdownView, Notice, Plugin, TFile, type Editor } from "obsidian";
+import {
+	debounce,
+	MarkdownView,
+	Notice,
+	Plugin,
+	TFile,
+	normalizePath,
+	type Editor,
+} from "obsidian";
 import {
 	DEFERRED_UNTIL_KEY,
 	HIDDEN_FROM_TASKS_KEY,
@@ -88,14 +96,16 @@ export default class VaultTasksPlugin extends Plugin {
 		this.registerEvent(
 			this.app.vault.on("delete", (file) => {
 				if (this.isMarkdownFile(file)) {
+					void this.removePinnedNotePath(file.path);
 					this.requestAutoRefresh();
 				}
 			}),
 		);
 
 		this.registerEvent(
-			this.app.vault.on("rename", (file) => {
+			this.app.vault.on("rename", (file, oldPath) => {
 				if (this.isMarkdownFile(file)) {
+					void this.renamePinnedNotePath(oldPath, file.path);
 					this.requestAutoRefresh();
 				}
 			}),
@@ -243,6 +253,52 @@ export default class VaultTasksPlugin extends Plugin {
 		this.showConnections = showConnections;
 		await this.updateHeaderControls();
 		await this.renderAllViews();
+	}
+
+	isNotePinned(fileOrPath: TFile | string): boolean {
+		return this.getPinnedNoteIndex(fileOrPath) !== -1;
+	}
+
+	canMovePinnedNote(fileOrPath: TFile | string, direction: "up" | "down"): boolean {
+		const pinnedIndex = this.getPinnedNoteIndex(fileOrPath);
+
+		if (pinnedIndex === -1) {
+			return false;
+		}
+
+		return direction === "up"
+			? pinnedIndex > 0
+			: pinnedIndex < this.settings.pinnedNotePaths.length - 1;
+	}
+
+	async pinNote(file: TFile): Promise<void> {
+		const notePath = normalizePath(file.path);
+		if (this.settings.pinnedNotePaths.includes(notePath)) {
+			return;
+		}
+
+		await this.updatePinnedNotePaths([...this.settings.pinnedNotePaths, notePath]);
+	}
+
+	async unpinNote(file: TFile): Promise<void> {
+		await this.removePinnedNotePath(file.path, true);
+	}
+
+	async movePinnedNote(file: TFile, direction: "up" | "down"): Promise<void> {
+		const pinnedIndex = this.getPinnedNoteIndex(file);
+		if (pinnedIndex === -1) {
+			return;
+		}
+
+		const targetIndex = direction === "up" ? pinnedIndex - 1 : pinnedIndex + 1;
+		if (targetIndex < 0 || targetIndex >= this.settings.pinnedNotePaths.length) {
+			return;
+		}
+
+		const pinnedNotePaths = [...this.settings.pinnedNotePaths];
+		const [notePath] = pinnedNotePaths.splice(pinnedIndex, 1);
+		pinnedNotePaths.splice(targetIndex, 0, notePath);
+		await this.updatePinnedNotePaths(pinnedNotePaths);
 	}
 
 	getAvailableSectionFilters(filter: TaskFilter): AvailableSectionFilters {
@@ -621,5 +677,68 @@ export default class VaultTasksPlugin extends Plugin {
 		}
 
 		editor.setLine(targetLine, nextLine);
+	}
+
+	private getPinnedNoteIndex(fileOrPath: TFile | string): number {
+		const notePath = normalizePath(
+			typeof fileOrPath === "string" ? fileOrPath : fileOrPath.path,
+		);
+		return this.settings.pinnedNotePaths.indexOf(notePath);
+	}
+
+	private async updatePinnedNotePaths(
+		pinnedNotePaths: string[],
+		shouldRerender = true,
+	): Promise<void> {
+		const normalizedPaths = normalizeSettings({
+			...this.settings,
+			pinnedNotePaths,
+		}).pinnedNotePaths;
+
+		if (
+			normalizedPaths.length === this.settings.pinnedNotePaths.length &&
+			normalizedPaths.every((path, index) => path === this.settings.pinnedNotePaths[index])
+		) {
+			return;
+		}
+
+		this.settings = {
+			...this.settings,
+			pinnedNotePaths: normalizedPaths,
+		};
+		await this.saveSettings();
+
+		if (shouldRerender) {
+			await this.renderAllViews();
+		}
+	}
+
+	private async removePinnedNotePath(
+		path: string,
+		shouldRerender = false,
+	): Promise<boolean> {
+		const notePath = normalizePath(path);
+		const pinnedNotePaths = this.settings.pinnedNotePaths.filter(
+			(candidatePath) => candidatePath !== notePath,
+		);
+
+		if (pinnedNotePaths.length === this.settings.pinnedNotePaths.length) {
+			return false;
+		}
+
+		await this.updatePinnedNotePaths(pinnedNotePaths, shouldRerender);
+		return true;
+	}
+
+	private async renamePinnedNotePath(oldPath: string, nextPath: string): Promise<void> {
+		const normalizedOldPath = normalizePath(oldPath);
+		const pinnedIndex = this.settings.pinnedNotePaths.indexOf(normalizedOldPath);
+		if (pinnedIndex === -1) {
+			return;
+		}
+
+		const pinnedNotePaths = [...this.settings.pinnedNotePaths];
+		pinnedNotePaths[pinnedIndex] = normalizePath(nextPath);
+		await this.updatePinnedNotePaths(pinnedNotePaths, false);
 	}
 }

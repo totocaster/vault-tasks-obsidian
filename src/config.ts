@@ -31,6 +31,7 @@ export const DEFAULT_SETTINGS: VaultTasksSettings = {
 	includeFolders: [],
 	openLocation: "main",
 	pendingMode: "todo-and-in-progress",
+	pinnedNotePaths: [],
 	persistSectionFilter: false,
 	savedSectionFilter: null,
 	sectionSort: "source",

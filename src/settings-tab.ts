@@ -178,7 +178,7 @@ export class VaultTasksSettingTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName("Sort notes by")
-			.setDesc("Choose how note groups are ordered in the task view.")
+			.setDesc("Choose how unpinned note groups are ordered in the task view.")
 			.addDropdown((component) => {
 				for (const [value, label] of Object.entries(NOTE_SORT_LABELS)) {
 					component.addOption(value, label);

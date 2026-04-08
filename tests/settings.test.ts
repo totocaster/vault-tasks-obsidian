@@ -12,12 +12,14 @@ import {
 test("normalizes settings with defaults and persisted section filter", () => {
 	const settings = normalizeSettings({
 		defaultFilter: "all",
+		pinnedNotePaths: ["Inbox.md", "./Projects/Alpha.md", "Inbox.md"],
 		persistSectionFilter: true,
 		savedSectionFilter: { kind: "heading", heading: "Work" },
 		showConnectionsByDefault: true,
 	});
 
 	assert.equal(settings.defaultFilter, "all");
+	assert.deepEqual(settings.pinnedNotePaths, ["Inbox.md", "Projects/Alpha.md"]);
 	assert.equal(settings.persistSectionFilter, true);
 	assert.deepEqual(settings.savedSectionFilter, { kind: "heading", heading: "Work" });
 	assert.equal(settings.showConnectionsByDefault, true);

@@ -45,7 +45,7 @@ export function buildRenderedDocument(
 	markdown: string;
 	renderedGroups: TaskGroup[];
 	renderedSections: TaskSectionGroup[];
-	renderedTasks: TaskItem[];
+		renderedTasks: TaskItem[];
 } {
 	const sections: string[] = [];
 	const renderedGroups: TaskGroup[] = [];
@@ -53,7 +53,11 @@ export function buildRenderedDocument(
 	const renderedTasks: TaskItem[] = [];
 	const today = getTodayDateString();
 	const visibleGroups = getVisibleTaskGroups(snapshot, today);
-	sortVisibleTaskGroups(visibleGroups, snapshot.settings.noteSort);
+	sortVisibleTaskGroups(
+		visibleGroups,
+		snapshot.settings.noteSort,
+		snapshot.settings.pinnedNotePaths,
+	);
 
 	for (const visibleGroup of visibleGroups) {
 		const { group, tasks } = visibleGroup;
@@ -615,6 +619,7 @@ export function normalizeSettings(value: unknown): VaultTasksSettings {
 		includeFolders: normalizeFolderList(candidate.includeFolders),
 		openLocation: normalizeTaskViewLocationValue(candidate.openLocation),
 		pendingMode: normalizePendingModeValue(candidate.pendingMode),
+		pinnedNotePaths: normalizeNotePathListValue(candidate.pinnedNotePaths),
 		persistSectionFilter,
 		savedSectionFilter: persistSectionFilter
 			? normalizeSectionFilter(candidate.savedSectionFilter)
@@ -654,15 +659,34 @@ export function isPathInFolder(path: string, folder: string): boolean {
 export function sortVisibleTaskGroups(
 	visibleGroups: VisibleTaskGroup[],
 	noteSort: NoteSortMode,
+	pinnedNotePaths: string[] = [],
 ): void {
-	visibleGroups.sort((left, right) => compareVisibleTaskGroups(left, right, noteSort));
+	visibleGroups.sort((left, right) =>
+		compareVisibleTaskGroups(left, right, noteSort, pinnedNotePaths),
+	);
 }
 
 export function compareVisibleTaskGroups(
 	left: VisibleTaskGroup,
 	right: VisibleTaskGroup,
 	noteSort: NoteSortMode,
+	pinnedNotePaths: string[] = [],
 ): number {
+	const leftPinnedIndex = getPinnedNoteIndexValue(left.group.file.path, pinnedNotePaths);
+	const rightPinnedIndex = getPinnedNoteIndexValue(right.group.file.path, pinnedNotePaths);
+
+	if (leftPinnedIndex !== -1 || rightPinnedIndex !== -1) {
+		if (leftPinnedIndex === -1) {
+			return 1;
+		}
+
+		if (rightPinnedIndex === -1) {
+			return -1;
+		}
+
+		return leftPinnedIndex - rightPinnedIndex;
+	}
+
 	switch (noteSort) {
 		case "title-desc":
 			return compareStrings(
@@ -714,6 +738,10 @@ export function compareVisibleTaskGroups(
 				right.group.file.path,
 			);
 	}
+}
+
+function getPinnedNoteIndexValue(path: string, pinnedNotePaths: string[]): number {
+	return pinnedNotePaths.indexOf(path);
 }
 
 export function sortRenderSectionBuckets(
@@ -823,6 +851,21 @@ export function normalizeFolderList(value: unknown): string[] {
 			value
 				.filter((entry): entry is string => typeof entry === "string")
 				.map((entry) => normalizeFolderPath(entry))
+				.filter((entry) => entry.length > 0),
+		),
+	);
+}
+
+function normalizeNotePathListValue(value: unknown): string[] {
+	if (!Array.isArray(value)) {
+		return [];
+	}
+
+	return Array.from(
+		new Set(
+			value
+				.filter((entry): entry is string => typeof entry === "string")
+				.map((entry) => normalizePath(entry))
 				.filter((entry) => entry.length > 0),
 		),
 	);

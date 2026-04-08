@@ -16,6 +16,7 @@ export function normalizeSettings(value: unknown): VaultTasksSettings {
 		includeFolders: normalizeFolderList(candidate.includeFolders),
 		openLocation: normalizeTaskViewLocation(candidate.openLocation),
 		pendingMode: normalizePendingMode(candidate.pendingMode),
+		pinnedNotePaths: normalizeNotePathList(candidate.pinnedNotePaths),
 		persistSectionFilter,
 		savedSectionFilter: persistSectionFilter
 			? normalizeSectionFilter(candidate.savedSectionFilter)
@@ -125,6 +126,21 @@ export function normalizeSectionFilter(value: unknown): SectionFilter {
 }
 
 export function normalizeFolderList(value: unknown): string[] {
+	if (!Array.isArray(value)) {
+		return [];
+	}
+
+	return Array.from(
+		new Set(
+			value
+				.filter((entry): entry is string => typeof entry === "string")
+				.map((entry) => normalizeFolderPath(entry))
+				.filter((entry) => entry.length > 0),
+		),
+	);
+}
+
+export function normalizeNotePathList(value: unknown): string[] {
 	if (!Array.isArray(value)) {
 		return [];
 	}

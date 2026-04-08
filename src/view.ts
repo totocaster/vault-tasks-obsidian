@@ -238,6 +238,7 @@ export class VaultTasksView extends ItemView {
 			headingEl.setAttr("data-scroll-anchor-kind", "group");
 			headingEl.setAttr("data-scroll-anchor-key", group.file.path);
 			this.bindHeadingMenu(headingEl, group);
+			this.decorateHeadingActions(headingEl, group);
 			this.decorateHeadingContext(headingEl);
 		}
 
@@ -670,6 +671,116 @@ export class VaultTasksView extends ItemView {
 		listItemEl.appendChild(jumpButtonEl);
 	}
 
+	private decorateHeadingActions(headingEl: HTMLHeadingElement, group: TaskGroup): void {
+		const headingBlockEl = headingEl.closest<HTMLElement>(".el-h2") ?? headingEl;
+		headingBlockEl.addClass("vault-tasks-view__note-heading-block");
+		headingEl.addClass("vault-tasks-view__note-heading");
+
+		const actionsEl = headingBlockEl.createDiv({
+			cls: "vault-tasks-view__note-actions",
+		});
+		const isPinned = this.plugin.isNotePinned(group.file);
+
+		this.createHeadingAction(actionsEl, {
+			alwaysVisible: isPinned,
+			ariaLabel: isPinned ? `Unpin ${group.noteTitle}` : `Pin ${group.noteTitle}`,
+			icon: "pin",
+			isPinned,
+			onClick: async () => {
+				if (this.plugin.isNotePinned(group.file)) {
+					await this.plugin.unpinNote(group.file);
+					return;
+				}
+
+				await this.plugin.pinNote(group.file);
+			},
+			title: isPinned ? "Unpin note" : "Pin note",
+		});
+
+		if (!isPinned) {
+			return;
+		}
+
+		this.createHeadingAction(actionsEl, {
+			ariaLabel: `Move ${group.noteTitle} up`,
+			disabled: !this.plugin.canMovePinnedNote(group.file, "up"),
+			icon: "arrow-up",
+			onClick: async () => {
+				await this.plugin.movePinnedNote(group.file, "up");
+			},
+			title: "Move pinned note up",
+		});
+
+		this.createHeadingAction(actionsEl, {
+			ariaLabel: `Move ${group.noteTitle} down`,
+			disabled: !this.plugin.canMovePinnedNote(group.file, "down"),
+			icon: "arrow-down",
+			onClick: async () => {
+				await this.plugin.movePinnedNote(group.file, "down");
+			},
+			title: "Move pinned note down",
+		});
+	}
+
+	private createHeadingAction(
+		containerEl: HTMLElement,
+		options: {
+			alwaysVisible?: boolean;
+			ariaLabel: string;
+			disabled?: boolean;
+			icon: string;
+			isPinned?: boolean;
+			onClick: () => Promise<void>;
+			title: string;
+		},
+	): void {
+		const actionEl = createEl("span", {
+			cls: "vault-tasks-view__note-action",
+			attr: {
+				"aria-label": options.ariaLabel,
+				"data-tooltip-position": "bottom",
+				title: options.title,
+			},
+		});
+		setIcon(actionEl, options.icon);
+
+		if (options.alwaysVisible) {
+			actionEl.addClass("is-always-visible");
+		}
+
+		if (options.isPinned) {
+			actionEl.addClass("is-pinned");
+		}
+
+		if (options.disabled) {
+			actionEl.addClass("is-disabled");
+			actionEl.setAttr("aria-disabled", "true");
+			containerEl.appendChild(actionEl);
+			return;
+		}
+
+		actionEl.setAttr("role", "button");
+		actionEl.setAttr("tabindex", "0");
+
+		this.registerDomEvent(actionEl, "click", (event) => {
+			event.preventDefault();
+			event.stopPropagation();
+			void options.onClick();
+		});
+
+		this.registerDomEvent(actionEl, "keydown", (event) => {
+			if (event.key !== "Enter" && event.key !== " ") {
+				return;
+			}
+
+			event.preventDefault();
+			event.stopPropagation();
+			void options.onClick();
+		});
+
+		containerEl.appendChild(actionEl);
+	}
+
 	private applyTaskStatusToElement(listItemEl: HTMLElement, task: TaskItem): void {
 		const checkboxEl = listItemEl.querySelector<HTMLInputElement>("input[type='checkbox']");
 		if (!checkboxEl) {
@@ -821,6 +932,35 @@ export class VaultTasksView extends ItemView {
 					.onClick(() => {
 						const linkText = this.app.metadataCache.fileToLinktext(group.file, "/", true);
 						void this.plugin.copyToClipboard(`[[${linkText}]]`, "Copied wiki link.");
+					});
+			});
+			menu.addSeparator();
+			menu.addItem((item) => {
+				item
+					.setTitle(this.plugin.isNotePinned(group.file) ? "Unpin" : "Pin to top")
+					.setIcon("pin")
+					.onClick(() => {
+						void (this.plugin.isNotePinned(group.file)
+							? this.plugin.unpinNote(group.file)
+							: this.plugin.pinNote(group.file));
+					});
+			});
+			menu.addItem((item) => {
+				item
+					.setTitle("Move up")
+					.setIcon("arrow-up")
+					.setDisabled(!this.plugin.canMovePinnedNote(group.file, "up"))
+					.onClick(() => {
+						void this.plugin.movePinnedNote(group.file, "up");
+					});
+			});
+			menu.addItem((item) => {
+				item
+					.setTitle("Move down")
+					.setIcon("arrow-down")
+					.setDisabled(!this.plugin.canMovePinnedNote(group.file, "down"))
+					.onClick(() => {
+						void this.plugin.movePinnedNote(group.file, "down");
 					});
 			});
 			menu.addSeparator();

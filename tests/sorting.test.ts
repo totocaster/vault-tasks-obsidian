@@ -46,6 +46,26 @@ test("sorts visible groups by visible task count", () => {
 	assert.deepEqual(groups.map((group) => group.group.noteTitle), ["B", "A"]);
 });
 
+test("sorts pinned groups before the default note order", () => {
+	const groups: VisibleTaskGroup[] = [
+		{
+			group: { file: { path: "Inbox.md", basename: "Inbox" } as TaskItem["file"], noteTitle: "Inbox", deferredUntil: null, hiddenFromTaskList: false, tasks: [] },
+			tasks: [makeTask(1, "one")],
+		},
+		{
+			group: { file: { path: "Areas/Alpha.md", basename: "Alpha" } as TaskItem["file"], noteTitle: "Alpha", deferredUntil: null, hiddenFromTaskList: false, tasks: [] },
+			tasks: [makeTask(1, "one")],
+		},
+		{
+			group: { file: { path: "Projects/Zebra.md", basename: "Zebra" } as TaskItem["file"], noteTitle: "Zebra", deferredUntil: null, hiddenFromTaskList: false, tasks: [] },
+			tasks: [makeTask(1, "one")],
+		},
+	];
+
+	sortVisibleTaskGroups(groups, "title-asc", ["Projects/Zebra.md", "Inbox.md"]);
+	assert.deepEqual(groups.map((group) => group.group.noteTitle), ["Zebra", "Inbox", "Alpha"]);
+});
+
 test("sorts section buckets alphabetically", () => {
 	const buckets: RenderSectionBucket[] = [
 		{ heading: "Work", line: 10, tasks: [makeTask(10, "a")] },

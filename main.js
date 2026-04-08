@@ -54,6 +54,7 @@ var DEFAULT_SETTINGS = {
   includeFolders: [],
   openLocation: "main",
   pendingMode: "todo-and-in-progress",
+  pinnedNotePaths: [],
   persistSectionFilter: false,
   savedSectionFilter: null,
   sectionSort: "source",
@@ -154,7 +155,11 @@ function buildRenderedDocument(snapshot, metadataCache, getBacklinkFiles) {
   const renderedTasks = [];
   const today = getTodayDateString();
   const visibleGroups = getVisibleTaskGroups(snapshot, today);
-  sortVisibleTaskGroups(visibleGroups, snapshot.settings.noteSort);
+  sortVisibleTaskGroups(
+    visibleGroups,
+    snapshot.settings.noteSort,
+    snapshot.settings.pinnedNotePaths
+  );
   for (const visibleGroup of visibleGroups) {
     const { group, tasks } = visibleGroup;
     const linkText = escapeWikiLinkText(metadataCache.fileToLinktext(group.file, "/", true));
@@ -512,10 +517,23 @@ function normalizeTaskStatusSymbol(statusSymbol) {
       return statusSymbol || TASK_STATUS_TODO;
   }
 }
-function sortVisibleTaskGroups(visibleGroups, noteSort) {
-  visibleGroups.sort((left, right) => compareVisibleTaskGroups(left, right, noteSort));
+function sortVisibleTaskGroups(visibleGroups, noteSort, pinnedNotePaths = []) {
+  visibleGroups.sort(
+    (left, right) => compareVisibleTaskGroups(left, right, noteSort, pinnedNotePaths)
+  );
 }
-function compareVisibleTaskGroups(left, right, noteSort) {
+function compareVisibleTaskGroups(left, right, noteSort, pinnedNotePaths = []) {
+  const leftPinnedIndex = getPinnedNoteIndexValue(left.group.file.path, pinnedNotePaths);
+  const rightPinnedIndex = getPinnedNoteIndexValue(right.group.file.path, pinnedNotePaths);
+  if (leftPinnedIndex !== -1 || rightPinnedIndex !== -1) {
+    if (leftPinnedIndex === -1) {
+      return 1;
+    }
+    if (rightPinnedIndex === -1) {
+      return -1;
+    }
+    return leftPinnedIndex - rightPinnedIndex;
+  }
   switch (noteSort) {
     case "title-desc":
       return compareStrings(
@@ -561,6 +579,9 @@ function compareVisibleTaskGroups(left, right, noteSort) {
         right.group.file.path
       );
   }
+}
+function getPinnedNoteIndexValue(path, pinnedNotePaths) {
+  return pinnedNotePaths.indexOf(path);
 }
 function sortRenderSectionBuckets(sectionBuckets, sectionSort) {
   sectionBuckets.sort((left, right) => {
@@ -751,6 +772,7 @@ function normalizeSettings(value) {
     includeFolders: normalizeFolderList(candidate.includeFolders),
     openLocation: normalizeTaskViewLocation2(candidate.openLocation),
     pendingMode: normalizePendingMode2(candidate.pendingMode),
+    pinnedNotePaths: normalizeNotePathList(candidate.pinnedNotePaths),
     persistSectionFilter,
     savedSectionFilter: persistSectionFilter ? normalizeSectionFilter(candidate.savedSectionFilter) : null,
     sectionSort: normalizeSectionSortMode2(candidate.sectionSort),
@@ -819,6 +841,16 @@ function normalizeSectionFilter(value) {
   return null;
 }
 function normalizeFolderList(value) {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return Array.from(
+    new Set(
+      value.filter((entry) => typeof entry === "string").map((entry) => normalizeFolderPath(entry)).filter((entry) => entry.length > 0)
+    )
+  );
+}
+function normalizeNotePathList(value) {
   if (!Array.isArray(value)) {
     return [];
   }
@@ -944,7 +976,7 @@ var VaultTasksSettingTab = class extends import_obsidian2.PluginSettingTab {
       });
     });
     new import_obsidian2.Setting(containerEl).setName("Sorting").setHeading();
-    new import_obsidian2.Setting(containerEl).setName("Sort notes by").setDesc("Choose how note groups are ordered in the task view.").addDropdown((component) => {
+    new import_obsidian2.Setting(containerEl).setName("Sort notes by").setDesc("Choose how unpinned note groups are ordered in the task view.").addDropdown((component) => {
       for (const [value, label] of Object.entries(NOTE_SORT_LABELS)) {
         component.addOption(value, label);
       }
@@ -1215,6 +1247,7 @@ var VaultTasksView = class extends import_obsidian4.ItemView {
       headingEl.setAttr("data-scroll-anchor-kind", "group");
       headingEl.setAttr("data-scroll-anchor-key", group.file.path);
       this.bindHeadingMenu(headingEl, group);
+      this.decorateHeadingActions(headingEl, group);
       this.decorateHeadingContext(headingEl);
     }
     const sectionHeadings = Array.from(sizerEl.querySelectorAll("h3"));
@@ -1539,6 +1572,90 @@ var VaultTasksView = class extends import_obsidian4.ItemView {
     });
     listItemEl.appendChild(jumpButtonEl);
   }
+  decorateHeadingActions(headingEl, group) {
+    var _a;
+    const headingBlockEl = (_a = headingEl.closest(".el-h2")) != null ? _a : headingEl;
+    headingBlockEl.addClass("vault-tasks-view__note-heading-block");
+    headingEl.addClass("vault-tasks-view__note-heading");
+    const actionsEl = headingBlockEl.createDiv({
+      cls: "vault-tasks-view__note-actions"
+    });
+    const isPinned = this.plugin.isNotePinned(group.file);
+    this.createHeadingAction(actionsEl, {
+      alwaysVisible: isPinned,
+      ariaLabel: isPinned ? `Unpin ${group.noteTitle}` : `Pin ${group.noteTitle}`,
+      icon: "pin",
+      isPinned,
+      onClick: async () => {
+        if (this.plugin.isNotePinned(group.file)) {
+          await this.plugin.unpinNote(group.file);
+          return;
+        }
+        await this.plugin.pinNote(group.file);
+      },
+      title: isPinned ? "Unpin note" : "Pin note"
+    });
+    if (!isPinned) {
+      return;
+    }
+    this.createHeadingAction(actionsEl, {
+      ariaLabel: `Move ${group.noteTitle} up`,
+      disabled: !this.plugin.canMovePinnedNote(group.file, "up"),
+      icon: "arrow-up",
+      onClick: async () => {
+        await this.plugin.movePinnedNote(group.file, "up");
+      },
+      title: "Move pinned note up"
+    });
+    this.createHeadingAction(actionsEl, {
+      ariaLabel: `Move ${group.noteTitle} down`,
+      disabled: !this.plugin.canMovePinnedNote(group.file, "down"),
+      icon: "arrow-down",
+      onClick: async () => {
+        await this.plugin.movePinnedNote(group.file, "down");
+      },
+      title: "Move pinned note down"
+    });
+  }
+  createHeadingAction(containerEl, options) {
+    const actionEl = createEl("span", {
+      cls: "vault-tasks-view__note-action",
+      attr: {
+        "aria-label": options.ariaLabel,
+        "data-tooltip-position": "bottom",
+        title: options.title
+      }
+    });
+    (0, import_obsidian4.setIcon)(actionEl, options.icon);
+    if (options.alwaysVisible) {
+      actionEl.addClass("is-always-visible");
+    }
+    if (options.isPinned) {
+      actionEl.addClass("is-pinned");
+    }
+    if (options.disabled) {
+      actionEl.addClass("is-disabled");
+      actionEl.setAttr("aria-disabled", "true");
+      containerEl.appendChild(actionEl);
+      return;
+    }
+    actionEl.setAttr("role", "button");
+    actionEl.setAttr("tabindex", "0");
+    this.registerDomEvent(actionEl, "click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      void options.onClick();
+    });
+    this.registerDomEvent(actionEl, "keydown", (event) => {
+      if (event.key !== "Enter" && event.key !== " ") {
+        return;
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      void options.onClick();
+    });
+    containerEl.appendChild(actionEl);
+  }
   applyTaskStatusToElement(listItemEl, task) {
     const checkboxEl = listItemEl.querySelector("input[type='checkbox']");
     if (!checkboxEl) {
@@ -1640,6 +1757,22 @@ var VaultTasksView = class extends import_obsidian4.ItemView {
         item.setTitle("Copy wiki link").setIcon("link").onClick(() => {
           const linkText = this.app.metadataCache.fileToLinktext(group.file, "/", true);
           void this.plugin.copyToClipboard(`[[${linkText}]]`, "Copied wiki link.");
+        });
+      });
+      menu.addSeparator();
+      menu.addItem((item) => {
+        item.setTitle(this.plugin.isNotePinned(group.file) ? "Unpin" : "Pin to top").setIcon("pin").onClick(() => {
+          void (this.plugin.isNotePinned(group.file) ? this.plugin.unpinNote(group.file) : this.plugin.pinNote(group.file));
+        });
+      });
+      menu.addItem((item) => {
+        item.setTitle("Move up").setIcon("arrow-up").setDisabled(!this.plugin.canMovePinnedNote(group.file, "up")).onClick(() => {
+          void this.plugin.movePinnedNote(group.file, "up");
+        });
+      });
+      menu.addItem((item) => {
+        item.setTitle("Move down").setIcon("arrow-down").setDisabled(!this.plugin.canMovePinnedNote(group.file, "down")).onClick(() => {
+          void this.plugin.movePinnedNote(group.file, "down");
         });
       });
       menu.addSeparator();
@@ -1819,13 +1952,15 @@ var VaultTasksPlugin = class extends import_obsidian5.Plugin {
     this.registerEvent(
       this.app.vault.on("delete", (file) => {
         if (this.isMarkdownFile(file)) {
+          void this.removePinnedNotePath(file.path);
           this.requestAutoRefresh();
         }
       })
     );
     this.registerEvent(
-      this.app.vault.on("rename", (file) => {
+      this.app.vault.on("rename", (file, oldPath) => {
         if (this.isMarkdownFile(file)) {
+          void this.renamePinnedNotePath(oldPath, file.path);
           this.requestAutoRefresh();
         }
       })
@@ -1946,6 +2081,40 @@ var VaultTasksPlugin = class extends import_obsidian5.Plugin {
     this.showConnections = showConnections;
     await this.updateHeaderControls();
     await this.renderAllViews();
+  }
+  isNotePinned(fileOrPath) {
+    return this.getPinnedNoteIndex(fileOrPath) !== -1;
+  }
+  canMovePinnedNote(fileOrPath, direction) {
+    const pinnedIndex = this.getPinnedNoteIndex(fileOrPath);
+    if (pinnedIndex === -1) {
+      return false;
+    }
+    return direction === "up" ? pinnedIndex > 0 : pinnedIndex < this.settings.pinnedNotePaths.length - 1;
+  }
+  async pinNote(file) {
+    const notePath = (0, import_obsidian5.normalizePath)(file.path);
+    if (this.settings.pinnedNotePaths.includes(notePath)) {
+      return;
+    }
+    await this.updatePinnedNotePaths([...this.settings.pinnedNotePaths, notePath]);
+  }
+  async unpinNote(file) {
+    await this.removePinnedNotePath(file.path, true);
+  }
+  async movePinnedNote(file, direction) {
+    const pinnedIndex = this.getPinnedNoteIndex(file);
+    if (pinnedIndex === -1) {
+      return;
+    }
+    const targetIndex = direction === "up" ? pinnedIndex - 1 : pinnedIndex + 1;
+    if (targetIndex < 0 || targetIndex >= this.settings.pinnedNotePaths.length) {
+      return;
+    }
+    const pinnedNotePaths = [...this.settings.pinnedNotePaths];
+    const [notePath] = pinnedNotePaths.splice(pinnedIndex, 1);
+    pinnedNotePaths.splice(targetIndex, 0, notePath);
+    await this.updatePinnedNotePaths(pinnedNotePaths);
   }
   getAvailableSectionFilters(filter) {
     const headings = /* @__PURE__ */ new Set();
@@ -2248,5 +2417,49 @@ var VaultTasksPlugin = class extends import_obsidian5.Plugin {
       throw new Error("The source line is no longer a standard Markdown task.");
     }
     editor.setLine(targetLine, nextLine);
+  }
+  getPinnedNoteIndex(fileOrPath) {
+    const notePath = (0, import_obsidian5.normalizePath)(
+      typeof fileOrPath === "string" ? fileOrPath : fileOrPath.path
+    );
+    return this.settings.pinnedNotePaths.indexOf(notePath);
+  }
+  async updatePinnedNotePaths(pinnedNotePaths, shouldRerender = true) {
+    const normalizedPaths = normalizeSettings({
+      ...this.settings,
+      pinnedNotePaths
+    }).pinnedNotePaths;
+    if (normalizedPaths.length === this.settings.pinnedNotePaths.length && normalizedPaths.every((path, index) => path === this.settings.pinnedNotePaths[index])) {
+      return;
+    }
+    this.settings = {
+      ...this.settings,
+      pinnedNotePaths: normalizedPaths
+    };
+    await this.saveSettings();
+    if (shouldRerender) {
+      await this.renderAllViews();
+    }
+  }
+  async removePinnedNotePath(path, shouldRerender = false) {
+    const notePath = (0, import_obsidian5.normalizePath)(path);
+    const pinnedNotePaths = this.settings.pinnedNotePaths.filter(
+      (candidatePath) => candidatePath !== notePath
+    );
+    if (pinnedNotePaths.length === this.settings.pinnedNotePaths.length) {
+      return false;
+    }
+    await this.updatePinnedNotePaths(pinnedNotePaths, shouldRerender);
+    return true;
+  }
+  async renamePinnedNotePath(oldPath, nextPath) {
+    const normalizedOldPath = (0, import_obsidian5.normalizePath)(oldPath);
+    const pinnedIndex = this.settings.pinnedNotePaths.indexOf(normalizedOldPath);
+    if (pinnedIndex === -1) {
+      return;
+    }
+    const pinnedNotePaths = [...this.settings.pinnedNotePaths];
+    pinnedNotePaths[pinnedIndex] = (0, import_obsidian5.normalizePath)(nextPath);
+    await this.updatePinnedNotePaths(pinnedNotePaths, false);
   }
 };

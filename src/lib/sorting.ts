@@ -17,15 +17,34 @@ import type {
 export function sortVisibleTaskGroups(
 	visibleGroups: VisibleTaskGroup[],
 	noteSort: NoteSortMode,
+	pinnedNotePaths: string[] = [],
 ): void {
-	visibleGroups.sort((left, right) => compareVisibleTaskGroups(left, right, noteSort));
+	visibleGroups.sort((left, right) =>
+		compareVisibleTaskGroups(left, right, noteSort, pinnedNotePaths),
+	);
 }
 
 export function compareVisibleTaskGroups(
 	left: VisibleTaskGroup,
 	right: VisibleTaskGroup,
 	noteSort: NoteSortMode,
+	pinnedNotePaths: string[] = [],
 ): number {
+	const leftPinnedIndex = getPinnedNoteIndex(left.group.file.path, pinnedNotePaths);
+	const rightPinnedIndex = getPinnedNoteIndex(right.group.file.path, pinnedNotePaths);
+
+	if (leftPinnedIndex !== -1 || rightPinnedIndex !== -1) {
+		if (leftPinnedIndex === -1) {
+			return 1;
+		}
+
+		if (rightPinnedIndex === -1) {
+			return -1;
+		}
+
+		return leftPinnedIndex - rightPinnedIndex;
+	}
+
 	switch (noteSort) {
 		case "title-desc":
 			return compareStrings(
@@ -77,6 +96,10 @@ export function compareVisibleTaskGroups(
 				right.group.file.path,
 			);
 	}
+}
+
+function getPinnedNoteIndex(path: string, pinnedNotePaths: string[]): number {
+	return pinnedNotePaths.indexOf(path);
 }
 
 export function sortRenderSectionBuckets(

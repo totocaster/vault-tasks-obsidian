@@ -22,6 +22,7 @@ export interface VaultTasksSettings {
 	includeFolders: string[];
 	openLocation: TaskViewLocation;
 	pendingMode: PendingMode;
+	pinnedNotePaths: string[];
 	persistSectionFilter: boolean;
 	savedSectionFilter: SectionFilter;
 	sectionSort: SectionSortMode;
