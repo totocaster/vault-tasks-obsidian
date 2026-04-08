@@ -1,29 +1,29 @@
 # Vault Tasks
 
-An Obsidian plugin that collects tasks from across your vault into a single grouped view.
+Vault Tasks is an Obsidian plugin that gathers Markdown tasks from across your vault into one grouped view while keeping the original notes as the source of truth.
 
-## What it does
+## Why
 
-- Groups tasks by note title
-- Groups note tasks by source section headings
-- Filters tasks by pending, completed, or all
-- Updates the original Markdown file when task state changes
-- Supports note-level defer and hide controls via frontmatter
+The goal is to make a global task list feel like a normal Obsidian note:
 
-## Usage
+- note groups render like `##` headings
+- section groups render like `###` headings
+- tasks keep normal Markdown checkbox styling
+- checking a task updates the original note
 
-Open `Vault tasks` from the ribbon icon or the command palette.
+## Features
 
-The view is designed to feel like normal Obsidian reading view:
-
-- note titles render as `##` headings
-- section headings render as `###`
-- tasks use standard Markdown task styling
-- task and heading context menus expose note and task actions
+- Groups tasks by note
+- Optionally groups tasks inside each note by source heading
+- Filters by pending, completed, or all
+- Filters by section name across notes
+- Supports pinned notes at the top of the list
+- Adds quick note and task actions from inline controls and context menus
+- Supports note-level defer and hide behavior through frontmatter
 
 ## Frontmatter
 
-The plugin currently recognizes these note-level keys:
+Recognized note-level keys:
 
 - `deferred-until: YYYY-MM-DD`
 - `hide-from-vault-tasks: true`
@@ -32,15 +32,17 @@ The plugin currently recognizes these note-level keys:
 
 The plugin includes a small settings pane for vault-level conventions:
 
-- view defaults like open location and default filter
-- related-note and section-heading defaults
-- optional persisted section filter
-- standard vs extended task status actions
-- pending/completed filter behavior
+- default open location and filter
+- related-notes and section-heading defaults
+- persisted section filter
+- standard or extended task status actions
+- pending and completed filter behavior
 - include and exclude folder scope
 - note, section, and task sorting
 
 ## Development
+
+Install dependencies and start watch mode:
 
 ```bash
 npm install
@@ -59,7 +61,7 @@ Run tests:
 npm test
 ```
 
-To test in a vault, symlink this folder into:
+For local vault development, symlink this repo into:
 
 ```text
 .obsidian/plugins/vault-tasks-view
