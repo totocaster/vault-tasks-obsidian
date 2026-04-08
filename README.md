@@ -2,6 +2,8 @@
 
 Vault Tasks is an Obsidian plugin that gathers Markdown tasks from across your vault into one grouped view while keeping the original notes as the source of truth.
 
+There is also a companion CLI, [`vault-tasks`](https://github.com/totocaster/vault-tasks-obsidian-cli), designed so scripts and AI agents can inspect the same task view the plugin shows to the user.
+
 ## Why
 
 The goal is to make a global task list feel like a normal Obsidian note:
@@ -20,6 +22,12 @@ The goal is to make a global task list feel like a normal Obsidian note:
 - Supports pinned notes at the top of the list
 - Adds quick note and task actions from inline controls and context menus
 - Supports note-level defer and hide behavior through frontmatter
+
+## Companion CLI
+
+The companion CLI, [`vault-tasks`](https://github.com/totocaster/vault-tasks-obsidian-cli), is primarily meant for automations, terminals, and AI agents.
+
+It reads the vault and the plugin's saved settings, then renders the same grouped task view and filtering logic used by the Obsidian plugin. That makes it useful when an agent or script needs the same task context the user sees in Obsidian, without inventing a separate task model.
 
 ## Frontmatter
 
