@@ -6,7 +6,8 @@
 	"scripts": {
 		"dev": "node esbuild.config.mjs",
 		"build": "tsc --noEmit --skipLibCheck && node esbuild.config.mjs production",
-		"check": "tsc --noEmit --skipLibCheck"
+		"check": "tsc --noEmit --skipLibCheck",
+		"test": "tsx --test tests/**/*.test.ts"
 	},
 	"keywords": [
 		"obsidian",
@@ -19,6 +20,7 @@
 		"builtin-modules": "^3.3.0",
 		"esbuild": "^0.25.4",
 		"obsidian": "latest",
+		"tsx": "^4.20.6",
 		"tslib": "^2.8.1",
 		"typescript": "^5.6.3"
 	}

@@ -28,7 +28,11 @@ __export(main_exports, {
   default: () => VaultTasksPlugin
 });
 module.exports = __toCommonJS(main_exports);
-var import_obsidian = require("obsidian");
+
+// src/plugin.ts
+var import_obsidian5 = require("obsidian");
+
+// src/config.ts
 var VIEW_TYPE_TASKS = "vault-tasks-view";
 var VIEW_TITLE = "Vault tasks";
 var DEFERRED_UNTIL_KEY = "deferred-until";
@@ -42,6 +46,7 @@ var TASK_STATUS_TODO = " ";
 var FRONTMATTER_PATTERN = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/;
 var TASK_LINE_PATTERN = /^(\s*(?:[-*+]|\d+[.)])\s+\[)(.)(\].*)$/;
 var TASK_TEXT_PATTERN = /^\s*(?:[-*+]|\d+[.)])\s+\[.\]\s?(.*)$/;
+var DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
 var DEFAULT_SETTINGS = {
   defaultFilter: "pending",
   excludeFolders: [],
@@ -77,7 +82,1651 @@ var TASK_SORT_LABELS = {
   "text-desc": "Task text (Z-A)",
   "status-source": "Status, then source order"
 };
-var VaultTasksPlugin = class extends import_obsidian.Plugin {
+function filterLabel(filter) {
+  switch (filter) {
+    case "pending":
+      return "Pending";
+    case "completed":
+      return "Completed";
+    default:
+      return "All";
+  }
+}
+function filterIcon(filter) {
+  switch (filter) {
+    case "pending":
+      return "circle";
+    case "completed":
+      return "check";
+    default:
+      return "list";
+  }
+}
+function filterDescription(filter) {
+  switch (filter) {
+    case "pending":
+      return "pending";
+    case "completed":
+      return "completed";
+    default:
+      return "all";
+  }
+}
+function normalizeTaskFilter(value) {
+  return value === "all" || value === "completed" || value === "pending" ? value : DEFAULT_SETTINGS.defaultFilter;
+}
+function normalizeTaskViewLocation(value) {
+  return value === "sidebar" || value === "main" ? value : DEFAULT_SETTINGS.openLocation;
+}
+function normalizeTaskStatusMode(value) {
+  return value === "standard" || value === "extended" ? value : DEFAULT_SETTINGS.statusMode;
+}
+function normalizePendingMode(value) {
+  return value === "todo-only" || value === "todo-and-in-progress" ? value : DEFAULT_SETTINGS.pendingMode;
+}
+function normalizeNoteSortMode(value) {
+  switch (value) {
+    case "title-asc":
+    case "title-desc":
+    case "path-asc":
+    case "path-desc":
+    case "task-count-desc":
+    case "task-count-asc":
+      return value;
+    default:
+      return DEFAULT_SETTINGS.noteSort;
+  }
+}
+function normalizeSectionSortMode(value) {
+  return value === "source" || value === "heading-asc" || value === "heading-desc" ? value : DEFAULT_SETTINGS.sectionSort;
+}
+function normalizeTaskSortMode(value) {
+  return value === "source" || value === "text-asc" || value === "text-desc" || value === "status-source" ? value : DEFAULT_SETTINGS.taskSort;
+}
+
+// src/logic.ts
+var import_obsidian = require("obsidian");
+function buildRenderedDocument(snapshot, metadataCache, getBacklinkFiles) {
+  var _a;
+  const sections = [];
+  const renderedGroups = [];
+  const renderedSections = [];
+  const renderedTasks = [];
+  const today = getTodayDateString();
+  const visibleGroups = getVisibleTaskGroups(snapshot, today);
+  sortVisibleTaskGroups(visibleGroups, snapshot.settings.noteSort);
+  for (const visibleGroup of visibleGroups) {
+    const { group, tasks } = visibleGroup;
+    const linkText = escapeWikiLinkText(metadataCache.fileToLinktext(group.file, "/", true));
+    const noteTitle = escapeWikiLinkText(group.noteTitle);
+    sections.push(`## [[${linkText}|${noteTitle}]]`);
+    renderedGroups.push(group);
+    if (snapshot.filter === "all" && group.deferredUntil) {
+      sections.push(buildDeferredUntilLine(group.deferredUntil));
+    }
+    if (snapshot.showConnections) {
+      const backlinks = getBacklinkFiles(group.file);
+      if (backlinks.length > 0) {
+        sections.push(buildConnectionsLine(backlinks, metadataCache));
+      }
+    }
+    const sectionBuckets = buildRenderSectionBuckets(tasks);
+    sortRenderSectionBuckets(sectionBuckets, snapshot.settings.sectionSort);
+    for (const sectionBucket of sectionBuckets) {
+      sortTasks(sectionBucket.tasks, snapshot.settings.taskSort);
+      let renderedSection = null;
+      if (snapshot.settings.showSectionHeadings && sectionBucket.heading !== null) {
+        sections.push(`### ${sectionBucket.heading}`);
+        renderedSection = {
+          file: group.file,
+          heading: sectionBucket.heading,
+          line: sectionBucket.line,
+          tasks: []
+        };
+        renderedSections.push(renderedSection);
+      }
+      for (const task of sectionBucket.tasks) {
+        sections.push(task.renderedLine);
+        renderedSection == null ? void 0 : renderedSection.tasks.push(task);
+        renderedTasks.push(task);
+      }
+    }
+    sections.push("");
+  }
+  if (sections.length === 0) {
+    const emptyMessage = (_a = snapshot.error) != null ? _a : buildEmptyStateMessage(snapshot.filter, snapshot.sectionFilter);
+    return {
+      markdown: emptyMessage,
+      renderedGroups,
+      renderedSections,
+      renderedTasks
+    };
+  }
+  return {
+    markdown: sections.join("\n").trim(),
+    renderedGroups,
+    renderedSections,
+    renderedTasks
+  };
+}
+function buildDeferredUntilLine(deferredUntil) {
+  return `<span class="vault-tasks-view__deferred-label">Deferred until:</span> ${deferredUntil}`;
+}
+function buildConnectionsLine(backlinks, metadataCache) {
+  const renderedLinks = backlinks.map((backlinkFile) => {
+    const linkText = escapeWikiLinkText(metadataCache.fileToLinktext(backlinkFile, "/", true));
+    return `[[${linkText}]]`;
+  });
+  return `<span class="vault-tasks-view__connections-label">Related to:</span> ${renderedLinks.join(", ")}`;
+}
+function getVisibleTaskGroups(snapshot, today) {
+  const visibleGroups = [];
+  for (const group of snapshot.groups) {
+    if (snapshot.filter === "pending" && isDeferred(group.deferredUntil, today)) {
+      continue;
+    }
+    const visibleTasks = group.tasks.filter(
+      (task) => matchesFilter(task, snapshot.filter, snapshot.settings) && matchesSectionFilter(task, snapshot.sectionFilter)
+    );
+    if (visibleTasks.length === 0) {
+      continue;
+    }
+    visibleGroups.push({
+      group,
+      tasks: [...visibleTasks]
+    });
+  }
+  return visibleGroups;
+}
+function buildRenderSectionBuckets(tasks) {
+  var _a;
+  const buckets = [];
+  let currentBucket = null;
+  let currentBucketKey = null;
+  for (const task of tasks) {
+    const bucketKey = task.sectionHeading !== null && task.sectionLine !== null ? `${task.sectionLine}:${task.sectionHeading}` : "__none__";
+    if (bucketKey !== currentBucketKey) {
+      currentBucketKey = bucketKey;
+      currentBucket = {
+        heading: task.sectionHeading,
+        line: (_a = task.sectionLine) != null ? _a : task.line,
+        tasks: []
+      };
+      buckets.push(currentBucket);
+    }
+    if (!currentBucket) {
+      continue;
+    }
+    currentBucket.tasks.push(task);
+  }
+  return buckets;
+}
+function buildTaskItem(file, taskItem, lines, headings) {
+  var _a, _b;
+  const line = taskItem.position.start.line;
+  const rawLine = lines[line];
+  if (rawLine === void 0) {
+    return null;
+  }
+  const text = extractTaskText(rawLine);
+  if (text === null) {
+    return null;
+  }
+  const section = findTaskSection(line, headings);
+  const statusSymbol = normalizeTaskStatusSymbol(taskItem.task);
+  return {
+    file,
+    key: `${file.path}:${line}`,
+    line,
+    rawLine,
+    renderedLine: rawLine.trimStart(),
+    sectionHeading: (_a = section == null ? void 0 : section.heading) != null ? _a : null,
+    sectionLine: (_b = section == null ? void 0 : section.position.start.line) != null ? _b : null,
+    statusSymbol,
+    text
+  };
+}
+function collectEditorLines(editor) {
+  const lines = [];
+  for (let index = 0; index < editor.lineCount(); index += 1) {
+    lines.push(editor.getLine(index));
+  }
+  return lines;
+}
+function escapeWikiLinkText(text) {
+  return text.replace(/([\\[\]|])/g, "\\$1");
+}
+function extractTaskText(rawLine) {
+  const match = rawLine.match(TASK_TEXT_PATTERN);
+  return match ? match[1] : null;
+}
+function getSectionFilterLabel(sectionFilter) {
+  if (!sectionFilter) {
+    return null;
+  }
+  if (sectionFilter.kind === "none") {
+    return "No section";
+  }
+  return sectionFilter.heading;
+}
+function buildEmptyStateMessage(filter, sectionFilter) {
+  const baseMessage = filter === "all" ? "No tasks." : `No ${filterDescription(filter)} tasks.`;
+  const sectionLabel = getSectionFilterLabel(sectionFilter);
+  if (!sectionLabel) {
+    return baseMessage;
+  }
+  if ((sectionFilter == null ? void 0 : sectionFilter.kind) === "none") {
+    return `${baseMessage.slice(0, -1)} without a section.`;
+  }
+  return `${baseMessage.slice(0, -1)} in ${sectionLabel}.`;
+}
+function getTodayDateString() {
+  return formatDate(/* @__PURE__ */ new Date());
+}
+function getTomorrowDateString() {
+  const tomorrow = /* @__PURE__ */ new Date();
+  tomorrow.setDate(tomorrow.getDate() + 1);
+  return formatDate(tomorrow);
+}
+function isDeferred(deferredUntil, today) {
+  return deferredUntil !== null && deferredUntil > today;
+}
+function isFutureDate(date) {
+  return DATE_PATTERN.test(date) && date >= getTomorrowDateString();
+}
+function isHiddenFromTaskListFrontmatter(frontmatter) {
+  var _a;
+  if (!frontmatter) {
+    return false;
+  }
+  return (_a = normalizeFrontmatterBoolean(frontmatter[HIDDEN_FROM_TASKS_KEY])) != null ? _a : false;
+}
+function findTaskLine(lines, task) {
+  const currentLine = lines[task.line];
+  if (currentLine !== void 0) {
+    const sameLine = currentLine === task.rawLine || extractTaskText(currentLine) === task.text;
+    if (sameLine) {
+      return task.line;
+    }
+  }
+  const rawLineMatches = lines.map((line, index) => ({ index, line })).filter(({ line }) => line === task.rawLine);
+  if (rawLineMatches.length === 1) {
+    return rawLineMatches[0].index;
+  }
+  const textMatches = lines.map((line, index) => ({ index, text: extractTaskText(line) })).filter(({ text }) => text === task.text);
+  if (textMatches.length === 1) {
+    return textMatches[0].index;
+  }
+  return null;
+}
+function getTaskListItems(cache) {
+  if (!(cache == null ? void 0 : cache.listItems)) {
+    return [];
+  }
+  return cache.listItems.filter((item) => item.task !== void 0);
+}
+function getHeadingCaches(cache) {
+  if (!(cache == null ? void 0 : cache.headings)) {
+    return [];
+  }
+  return [...cache.headings].sort(
+    (left, right) => left.position.start.line - right.position.start.line
+  );
+}
+function matchesFilter(task, filter, settings) {
+  switch (filter) {
+    case "pending":
+      return isPendingTaskStatus(task.statusSymbol, settings);
+    case "completed":
+      return isCompletedTaskStatus(task.statusSymbol, settings);
+    default:
+      return true;
+  }
+}
+function matchesSectionFilter(task, sectionFilter) {
+  if (!sectionFilter) {
+    return true;
+  }
+  if (sectionFilter.kind === "none") {
+    return task.sectionHeading === null;
+  }
+  return task.sectionHeading === sectionFilter.heading;
+}
+function setTaskStatusSymbol(rawLine, statusSymbol) {
+  const match = rawLine.match(TASK_LINE_PATTERN);
+  if (!match) {
+    return null;
+  }
+  return `${match[1]}${statusSymbol}${match[3]}`;
+}
+function getTaskStatusSymbol(rawLine) {
+  const match = rawLine.match(TASK_LINE_PATTERN);
+  return match ? match[2] : null;
+}
+function findTaskSection(taskLine, headings) {
+  let nearestHeading = null;
+  for (const heading of headings) {
+    if (heading.position.start.line >= taskLine) {
+      break;
+    }
+    nearestHeading = heading;
+  }
+  return nearestHeading;
+}
+function updateSpecificTasksInEditor(editor, tasks, statusSymbol, options) {
+  const lines = collectEditorLines(editor);
+  let updatedCount = 0;
+  for (const task of tasks) {
+    const targetLine = findTaskLine(lines, task);
+    if (targetLine === null) {
+      continue;
+    }
+    const currentLine = lines[targetLine];
+    const currentStatus = getTaskStatusSymbol(currentLine);
+    if (currentStatus === null) {
+      continue;
+    }
+    if ((options == null ? void 0 : options.onlyUnchecked) && currentStatus !== TASK_STATUS_TODO) {
+      continue;
+    }
+    const nextLine = setTaskStatusSymbol(currentLine, statusSymbol);
+    if (nextLine === null || nextLine === currentLine) {
+      continue;
+    }
+    lines[targetLine] = nextLine;
+    editor.setLine(targetLine, nextLine);
+    updatedCount += 1;
+  }
+  return updatedCount;
+}
+function updateTaskStatusInContent(content, task, statusSymbol) {
+  const newline = content.includes("\r\n") ? "\r\n" : "\n";
+  const lines = content.split(/\r?\n/);
+  const targetLine = findTaskLine(lines, task);
+  if (targetLine === null) {
+    throw new Error("The task moved before it could be updated. Refresh and try again.");
+  }
+  const nextLine = setTaskStatusSymbol(lines[targetLine], statusSymbol);
+  if (nextLine === null) {
+    throw new Error("The source line is no longer a standard Markdown task.");
+  }
+  lines[targetLine] = nextLine;
+  return lines.join(newline);
+}
+function updateSpecificTasksInContent(content, tasks, statusSymbol, options) {
+  const newline = content.includes("\r\n") ? "\r\n" : "\n";
+  const lines = content.split(/\r?\n/);
+  let updatedCount = 0;
+  for (const task of tasks) {
+    const targetLine = findTaskLine(lines, task);
+    if (targetLine === null) {
+      continue;
+    }
+    const currentLine = lines[targetLine];
+    const currentStatus = getTaskStatusSymbol(currentLine);
+    if (currentStatus === null) {
+      continue;
+    }
+    if ((options == null ? void 0 : options.onlyUnchecked) && currentStatus !== TASK_STATUS_TODO) {
+      continue;
+    }
+    const nextLine = setTaskStatusSymbol(currentLine, statusSymbol);
+    if (nextLine === null || nextLine === currentLine) {
+      continue;
+    }
+    lines[targetLine] = nextLine;
+    updatedCount += 1;
+  }
+  return {
+    content: lines.join(newline),
+    updatedCount
+  };
+}
+function isCheckboxCheckedStatus(statusSymbol) {
+  return statusSymbol !== TASK_STATUS_TODO;
+}
+function isCompletedTaskStatus(statusSymbol, settings) {
+  return statusSymbol === TASK_STATUS_DONE || statusSymbol === "X" || settings.includeCancelledInCompleted && statusSymbol === TASK_STATUS_CANCELLED;
+}
+function isPendingTaskStatus(statusSymbol, settings) {
+  return statusSymbol === TASK_STATUS_TODO || settings.pendingMode === "todo-and-in-progress" && statusSymbol === TASK_STATUS_IN_PROGRESS;
+}
+function normalizeTaskStatusSymbol(statusSymbol) {
+  switch (statusSymbol) {
+    case TASK_STATUS_TODO:
+    case TASK_STATUS_IN_PROGRESS:
+    case TASK_STATUS_DONE:
+    case "X":
+    case TASK_STATUS_CANCELLED:
+    case TASK_STATUS_DEFERRED:
+      return statusSymbol;
+    default:
+      return statusSymbol || TASK_STATUS_TODO;
+  }
+}
+function sortVisibleTaskGroups(visibleGroups, noteSort) {
+  visibleGroups.sort((left, right) => compareVisibleTaskGroups(left, right, noteSort));
+}
+function compareVisibleTaskGroups(left, right, noteSort) {
+  switch (noteSort) {
+    case "title-desc":
+      return compareStrings(
+        right.group.noteTitle,
+        left.group.noteTitle,
+        left.group.file.path,
+        right.group.file.path
+      );
+    case "path-asc":
+      return compareStrings(
+        left.group.file.path,
+        right.group.file.path,
+        left.group.noteTitle,
+        right.group.noteTitle
+      );
+    case "path-desc":
+      return compareStrings(
+        right.group.file.path,
+        left.group.file.path,
+        left.group.noteTitle,
+        right.group.noteTitle
+      );
+    case "task-count-desc":
+      return right.tasks.length - left.tasks.length || compareStrings(
+        left.group.noteTitle,
+        right.group.noteTitle,
+        left.group.file.path,
+        right.group.file.path
+      );
+    case "task-count-asc":
+      return left.tasks.length - right.tasks.length || compareStrings(
+        left.group.noteTitle,
+        right.group.noteTitle,
+        left.group.file.path,
+        right.group.file.path
+      );
+    case "title-asc":
+    default:
+      return compareStrings(
+        left.group.noteTitle,
+        right.group.noteTitle,
+        left.group.file.path,
+        right.group.file.path
+      );
+  }
+}
+function sortRenderSectionBuckets(sectionBuckets, sectionSort) {
+  sectionBuckets.sort((left, right) => {
+    if (left.heading === null && right.heading === null) {
+      return left.line - right.line;
+    }
+    if (left.heading === null) {
+      return -1;
+    }
+    if (right.heading === null) {
+      return 1;
+    }
+    switch (sectionSort) {
+      case "heading-asc":
+        return compareStrings(left.heading, right.heading, String(left.line), String(right.line));
+      case "heading-desc":
+        return compareStrings(right.heading, left.heading, String(left.line), String(right.line));
+      case "source":
+      default:
+        return left.line - right.line || left.heading.localeCompare(right.heading);
+    }
+  });
+}
+function sortTasks(tasks, taskSort) {
+  tasks.sort((left, right) => compareTasks(left, right, taskSort));
+}
+function compareTasks(left, right, taskSort) {
+  switch (taskSort) {
+    case "text-asc":
+      return compareStrings(left.text, right.text, String(left.line), String(right.line));
+    case "text-desc":
+      return compareStrings(right.text, left.text, String(left.line), String(right.line));
+    case "status-source":
+      return getTaskStatusSortRank(left.statusSymbol) - getTaskStatusSortRank(right.statusSymbol) || left.line - right.line || left.text.localeCompare(right.text);
+    case "source":
+    default:
+      return left.line - right.line || left.text.localeCompare(right.text);
+  }
+}
+function getTaskStatusSortRank(statusSymbol) {
+  switch (statusSymbol) {
+    case TASK_STATUS_TODO:
+      return 0;
+    case TASK_STATUS_IN_PROGRESS:
+      return 1;
+    case TASK_STATUS_DEFERRED:
+      return 2;
+    case TASK_STATUS_DONE:
+    case "X":
+      return 3;
+    case TASK_STATUS_CANCELLED:
+      return 4;
+    default:
+      return 5;
+  }
+}
+function compareStrings(left, right, leftFallback, rightFallback) {
+  return left.localeCompare(right) || leftFallback.localeCompare(rightFallback);
+}
+function formatDate(date) {
+  const year = String(date.getFullYear());
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+function normalizeFrontmatterBoolean(value) {
+  if (typeof value === "boolean") {
+    return value;
+  }
+  if (typeof value !== "string") {
+    return null;
+  }
+  switch (unquoteFrontmatterValue(value).toLowerCase()) {
+    case "true":
+    case "yes":
+    case "on":
+      return true;
+    case "false":
+    case "no":
+    case "off":
+      return false;
+    default:
+      return null;
+  }
+}
+function unquoteFrontmatterValue(value) {
+  if (value === null) {
+    return "";
+  }
+  const trimmedValue = value.trim();
+  return trimmedValue.startsWith('"') && trimmedValue.endsWith('"') || trimmedValue.startsWith("'") && trimmedValue.endsWith("'") ? trimmedValue.slice(1, -1) : trimmedValue;
+}
+
+// src/lib/frontmatter.ts
+function extractDeferredUntil(content) {
+  var _a;
+  return normalizeDeferredUntil(
+    (_a = extractFrontmatterValue(content, DEFERRED_UNTIL_KEY)) != null ? _a : extractFrontmatterValue(content, LEGACY_DEFERRED_UNTIL_KEY)
+  );
+}
+function extractHiddenFromTaskList(content) {
+  var _a;
+  return (_a = normalizeFrontmatterBoolean2(extractFrontmatterValue(content, HIDDEN_FROM_TASKS_KEY))) != null ? _a : false;
+}
+function normalizeDeferredUntil(value) {
+  const unquotedValue = unquoteFrontmatterValue2(value);
+  return DATE_PATTERN.test(unquotedValue) ? unquotedValue : null;
+}
+function extractFrontmatterValue(content, key) {
+  const frontmatterMatch = content.match(FRONTMATTER_PATTERN);
+  if (!frontmatterMatch) {
+    return null;
+  }
+  const frontmatter = frontmatterMatch[1];
+  const valueMatch = frontmatter.match(new RegExp(`^${key}:\\s*(.+?)\\s*$`, "m"));
+  return valueMatch ? valueMatch[1] : null;
+}
+function normalizeFrontmatterBoolean2(value) {
+  if (typeof value === "boolean") {
+    return value;
+  }
+  if (typeof value !== "string") {
+    return null;
+  }
+  switch (unquoteFrontmatterValue2(value).toLowerCase()) {
+    case "true":
+    case "yes":
+    case "on":
+      return true;
+    case "false":
+    case "no":
+    case "off":
+      return false;
+    default:
+      return null;
+  }
+}
+function unquoteFrontmatterValue2(value) {
+  if (value === null) {
+    return "";
+  }
+  const trimmedValue = value.trim();
+  return trimmedValue.startsWith('"') && trimmedValue.endsWith('"') || trimmedValue.startsWith("'") && trimmedValue.endsWith("'") ? trimmedValue.slice(1, -1) : trimmedValue;
+}
+
+// src/lib/filtering.ts
+function matchesFilter2(task, filter, settings) {
+  switch (filter) {
+    case "pending":
+      return isPendingTaskStatus2(task.statusSymbol, settings);
+    case "completed":
+      return isCompletedTaskStatus2(task.statusSymbol, settings);
+    default:
+      return true;
+  }
+}
+function isSameSectionFilter(left, right) {
+  if (left === right) {
+    return true;
+  }
+  if (!left || !right || left.kind !== right.kind) {
+    return false;
+  }
+  if (left.kind === "none") {
+    return true;
+  }
+  if (right.kind === "none") {
+    return false;
+  }
+  return left.heading === right.heading;
+}
+function isCompletedTaskStatus2(statusSymbol, settings) {
+  return statusSymbol === TASK_STATUS_DONE || statusSymbol === "X" || settings.includeCancelledInCompleted && statusSymbol === TASK_STATUS_CANCELLED;
+}
+function isPendingTaskStatus2(statusSymbol, settings) {
+  return statusSymbol === TASK_STATUS_TODO || settings.pendingMode === "todo-and-in-progress" && statusSymbol === TASK_STATUS_IN_PROGRESS;
+}
+
+// src/lib/settings.ts
+function normalizeSettings(value) {
+  const candidate = isObjectRecord(value) ? value : {};
+  const defaultFilter = normalizeTaskFilter2(candidate.defaultFilter);
+  const persistSectionFilter = candidate.persistSectionFilter === true;
+  return {
+    defaultFilter,
+    excludeFolders: normalizeFolderList(candidate.excludeFolders),
+    includeCancelledInCompleted: typeof candidate.includeCancelledInCompleted === "boolean" ? candidate.includeCancelledInCompleted : DEFAULT_SETTINGS.includeCancelledInCompleted,
+    includeFolders: normalizeFolderList(candidate.includeFolders),
+    openLocation: normalizeTaskViewLocation2(candidate.openLocation),
+    pendingMode: normalizePendingMode2(candidate.pendingMode),
+    persistSectionFilter,
+    savedSectionFilter: persistSectionFilter ? normalizeSectionFilter(candidate.savedSectionFilter) : null,
+    sectionSort: normalizeSectionSortMode2(candidate.sectionSort),
+    showConnectionsByDefault: typeof candidate.showConnectionsByDefault === "boolean" ? candidate.showConnectionsByDefault : DEFAULT_SETTINGS.showConnectionsByDefault,
+    showSectionHeadings: typeof candidate.showSectionHeadings === "boolean" ? candidate.showSectionHeadings : DEFAULT_SETTINGS.showSectionHeadings,
+    statusMode: normalizeTaskStatusMode2(candidate.statusMode),
+    taskSort: normalizeTaskSortMode2(candidate.taskSort),
+    noteSort: normalizeNoteSortMode2(candidate.noteSort)
+  };
+}
+function matchesFolderScope(path, settings) {
+  const normalizedPath = normalizeFolderPath(path);
+  const hasIncludedFolder = settings.includeFolders.length === 0 || settings.includeFolders.some((folder) => isPathInFolder(normalizedPath, folder));
+  if (!hasIncludedFolder) {
+    return false;
+  }
+  return !settings.excludeFolders.some((folder) => isPathInFolder(normalizedPath, folder));
+}
+function isPathInFolder(path, folder) {
+  return path === folder || path.startsWith(`${folder}/`);
+}
+function normalizeTaskFilter2(value) {
+  return value === "all" || value === "completed" || value === "pending" ? value : DEFAULT_SETTINGS.defaultFilter;
+}
+function normalizeTaskViewLocation2(value) {
+  return value === "sidebar" || value === "main" ? value : DEFAULT_SETTINGS.openLocation;
+}
+function normalizeTaskStatusMode2(value) {
+  return value === "standard" || value === "extended" ? value : DEFAULT_SETTINGS.statusMode;
+}
+function normalizePendingMode2(value) {
+  return value === "todo-only" || value === "todo-and-in-progress" ? value : DEFAULT_SETTINGS.pendingMode;
+}
+function normalizeNoteSortMode2(value) {
+  switch (value) {
+    case "title-asc":
+    case "title-desc":
+    case "path-asc":
+    case "path-desc":
+    case "task-count-desc":
+    case "task-count-asc":
+      return value;
+    default:
+      return DEFAULT_SETTINGS.noteSort;
+  }
+}
+function normalizeSectionSortMode2(value) {
+  return value === "source" || value === "heading-asc" || value === "heading-desc" ? value : DEFAULT_SETTINGS.sectionSort;
+}
+function normalizeTaskSortMode2(value) {
+  return value === "source" || value === "text-asc" || value === "text-desc" || value === "status-source" ? value : DEFAULT_SETTINGS.taskSort;
+}
+function normalizeSectionFilter(value) {
+  if (!isObjectRecord(value) || typeof value.kind !== "string") {
+    return null;
+  }
+  if (value.kind === "none") {
+    return { kind: "none" };
+  }
+  if (value.kind === "heading" && typeof value.heading === "string" && value.heading.trim().length > 0) {
+    return {
+      kind: "heading",
+      heading: value.heading.trim()
+    };
+  }
+  return null;
+}
+function normalizeFolderList(value) {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return Array.from(
+    new Set(
+      value.filter((entry) => typeof entry === "string").map((entry) => normalizeFolderPath(entry)).filter((entry) => entry.length > 0)
+    )
+  );
+}
+function parseFolderListInput(value) {
+  return normalizeFolderList(
+    value.split(/\r?\n|,/).map((entry) => entry.trim()).filter((entry) => entry.length > 0)
+  );
+}
+function formatFolderList(folders) {
+  return folders.join("\n");
+}
+function normalizeFolderPath(path) {
+  return path.replace(/\\/g, "/").trim().replace(/^\.\/+/, "").replace(/\/+/g, "/").replace(/\/$/, "");
+}
+function isObjectRecord(value) {
+  return typeof value === "object" && value !== null;
+}
+
+// src/settings-tab.ts
+var import_obsidian2 = require("obsidian");
+var VaultTasksSettingTab = class extends import_obsidian2.PluginSettingTab {
+  constructor(app, plugin) {
+    super(app, plugin);
+    this.plugin = plugin;
+  }
+  display() {
+    const { containerEl } = this;
+    const settings = this.plugin.getSettings();
+    containerEl.empty();
+    new import_obsidian2.Setting(containerEl).setName("View defaults").setHeading();
+    new import_obsidian2.Setting(containerEl).setName("Open location").setDesc("Choose where the task view opens when a new leaf is created.").addDropdown((component) => {
+      component.addOption("main", "Main tab").addOption("sidebar", "Right sidebar").setValue(settings.openLocation).onChange(async (value) => {
+        await this.plugin.updateSettings({
+          openLocation: normalizeTaskViewLocation(value)
+        });
+      });
+    });
+    new import_obsidian2.Setting(containerEl).setName("Default filter").setDesc("Choose which task filter the view starts with.").addDropdown((component) => {
+      component.addOption("pending", "Pending").addOption("all", "All").addOption("completed", "Completed").setValue(settings.defaultFilter).onChange(async (value) => {
+        const defaultFilter = normalizeTaskFilter(value);
+        await this.plugin.updateSettings({ defaultFilter });
+        await this.plugin.setFilter(defaultFilter);
+      });
+    });
+    new import_obsidian2.Setting(containerEl).setName("Show related notes by default").setDesc("Show backlink context under note titles when the view opens.").addToggle((component) => {
+      component.setValue(settings.showConnectionsByDefault).onChange(async (value) => {
+        await this.plugin.updateSettings({
+          showConnectionsByDefault: value
+        });
+        await this.plugin.setShowConnections(value);
+      });
+    });
+    new import_obsidian2.Setting(containerEl).setName("Show section headings").setDesc("Render source headings inside each note group.").addToggle((component) => {
+      component.setValue(settings.showSectionHeadings).onChange(async (value) => {
+        await this.plugin.updateSettings({
+          showSectionHeadings: value
+        });
+        await this.plugin.rerenderViews();
+      });
+    });
+    new import_obsidian2.Setting(containerEl).setName("Remember section filter").setDesc("Restore the last selected section filter when Obsidian restarts.").addToggle((component) => {
+      component.setValue(settings.persistSectionFilter).onChange(async (value) => {
+        await this.plugin.updateSettings({
+          persistSectionFilter: value,
+          savedSectionFilter: value ? this.plugin.getSectionFilter() : null
+        });
+      });
+    });
+    new import_obsidian2.Setting(containerEl).setName("Tasks").setHeading();
+    new import_obsidian2.Setting(containerEl).setName("Task status actions").setDesc("Choose whether task menus use only standard Markdown states or extended states.").addDropdown((component) => {
+      component.addOption("standard", "Standard Markdown").addOption("extended", "Extended statuses").setValue(settings.statusMode).onChange(async (value) => {
+        await this.plugin.updateSettings({
+          statusMode: normalizeTaskStatusMode(value)
+        });
+        await this.plugin.rerenderViews();
+      });
+    });
+    new import_obsidian2.Setting(containerEl).setName("Pending filter").setDesc("Choose whether in-progress tasks appear in the pending view.").addDropdown((component) => {
+      component.addOption("todo-only", "[ ] only").addOption("todo-and-in-progress", "[ ] and [/]").setValue(settings.pendingMode).onChange(async (value) => {
+        await this.plugin.updateSettings({
+          pendingMode: normalizePendingMode(value)
+        });
+        await this.plugin.rerenderViews();
+      });
+    });
+    new import_obsidian2.Setting(containerEl).setName("Include cancelled in completed").setDesc("Show cancelled tasks in the completed view.").addToggle((component) => {
+      component.setValue(settings.includeCancelledInCompleted).onChange(async (value) => {
+        await this.plugin.updateSettings({
+          includeCancelledInCompleted: value
+        });
+        await this.plugin.rerenderViews();
+      });
+    });
+    new import_obsidian2.Setting(containerEl).setName("Scope").setHeading();
+    new import_obsidian2.Setting(containerEl).setName("Include folders").setDesc("One folder per line. Leave empty to include the whole vault.").addTextArea((component) => {
+      component.setValue(formatFolderList(settings.includeFolders));
+      component.inputEl.rows = 4;
+      component.inputEl.addEventListener("change", () => {
+        void (async () => {
+          await this.plugin.updateSettings({
+            includeFolders: parseFolderListInput(component.inputEl.value)
+          });
+          await this.plugin.rebuildIndex();
+        })();
+      });
+    });
+    new import_obsidian2.Setting(containerEl).setName("Exclude folders").setDesc("One folder per line. Excluded folders always win.").addTextArea((component) => {
+      component.setValue(formatFolderList(settings.excludeFolders));
+      component.inputEl.rows = 4;
+      component.inputEl.addEventListener("change", () => {
+        void (async () => {
+          await this.plugin.updateSettings({
+            excludeFolders: parseFolderListInput(component.inputEl.value)
+          });
+          await this.plugin.rebuildIndex();
+        })();
+      });
+    });
+    new import_obsidian2.Setting(containerEl).setName("Sorting").setHeading();
+    new import_obsidian2.Setting(containerEl).setName("Sort notes by").setDesc("Choose how note groups are ordered in the task view.").addDropdown((component) => {
+      for (const [value, label] of Object.entries(NOTE_SORT_LABELS)) {
+        component.addOption(value, label);
+      }
+      component.setValue(settings.noteSort).onChange(async (value) => {
+        await this.plugin.updateSettings({
+          noteSort: normalizeNoteSortMode(value)
+        });
+        await this.plugin.rerenderViews();
+      });
+    });
+    new import_obsidian2.Setting(containerEl).setName("Sort sections by").setDesc("Choose how section groups are ordered inside each note.").addDropdown((component) => {
+      for (const [value, label] of Object.entries(SECTION_SORT_LABELS)) {
+        component.addOption(value, label);
+      }
+      component.setValue(settings.sectionSort).onChange(async (value) => {
+        await this.plugin.updateSettings({
+          sectionSort: normalizeSectionSortMode(value)
+        });
+        await this.plugin.rerenderViews();
+      });
+    });
+    new import_obsidian2.Setting(containerEl).setName("Sort tasks by").setDesc("Choose how tasks are ordered within each section.").addDropdown((component) => {
+      for (const [value, label] of Object.entries(TASK_SORT_LABELS)) {
+        component.addOption(value, label);
+      }
+      component.setValue(settings.taskSort).onChange(async (value) => {
+        await this.plugin.updateSettings({
+          taskSort: normalizeTaskSortMode(value)
+        });
+        await this.plugin.rerenderViews();
+      });
+    });
+  }
+};
+
+// src/view.ts
+var import_obsidian4 = require("obsidian");
+
+// src/defer-until-modal.ts
+var import_obsidian3 = require("obsidian");
+var DeferUntilModal = class extends import_obsidian3.Modal {
+  constructor(app, noteTitle, currentDeferredUntil, onSubmitDate) {
+    super(app);
+    this.noteTitle = noteTitle;
+    this.currentDeferredUntil = currentDeferredUntil;
+    this.onSubmitDate = onSubmitDate;
+    this.dateInputEl = null;
+    this.minimumDate = getTomorrowDateString();
+  }
+  onOpen() {
+    var _a;
+    this.setTitle("Defer until");
+    new import_obsidian3.Setting(this.contentEl).setName(this.noteTitle).setDesc("Pending tasks from this note stay hidden until this date.").addText((component) => {
+      component.inputEl.type = "date";
+      component.inputEl.min = this.minimumDate;
+      component.setValue(this.getInitialDateValue());
+      this.dateInputEl = component.inputEl;
+      component.inputEl.addEventListener("keydown", (event) => {
+        if (event.key !== "Enter") {
+          return;
+        }
+        event.preventDefault();
+        void this.submit();
+      });
+    });
+    new import_obsidian3.Setting(this.contentEl).addButton((button) => {
+      button.setButtonText("Cancel").onClick(() => {
+        this.close();
+      });
+    }).addButton((button) => {
+      button.setButtonText("Save").setCta().onClick(() => {
+        void this.submit();
+      });
+    });
+    (_a = this.dateInputEl) == null ? void 0 : _a.focus();
+    window.setTimeout(() => {
+      var _a2;
+      const dateInputEl = this.dateInputEl;
+      try {
+        (_a2 = dateInputEl == null ? void 0 : dateInputEl.showPicker) == null ? void 0 : _a2.call(dateInputEl);
+      } catch (e) {
+      }
+    }, 0);
+  }
+  getInitialDateValue() {
+    if (this.currentDeferredUntil && this.currentDeferredUntil >= this.minimumDate) {
+      return this.currentDeferredUntil;
+    }
+    return this.minimumDate;
+  }
+  async submit() {
+    var _a, _b;
+    const deferredUntil = (_b = (_a = this.dateInputEl) == null ? void 0 : _a.value) != null ? _b : "";
+    if (!isFutureDate(deferredUntil)) {
+      new import_obsidian3.Notice("Choose a future date.");
+      return;
+    }
+    await this.onSubmitDate(deferredUntil);
+    this.close();
+  }
+};
+
+// src/view.ts
+var VaultTasksView = class extends import_obsidian4.ItemView {
+  constructor(leaf, plugin) {
+    super(leaf);
+    this.plugin = plugin;
+    this.archiveButtonEl = null;
+    this.connectionsButtonEl = null;
+    this.filterButtons = /* @__PURE__ */ new Map();
+    this.headerFilterEl = null;
+    this.markdownHostEl = null;
+    this.renderComponent = null;
+    this.renderedTasks = /* @__PURE__ */ new Map();
+    this.sectionFilterButtonEl = null;
+    this.sectionFilterChipEl = null;
+  }
+  getViewType() {
+    return VIEW_TYPE_TASKS;
+  }
+  getDisplayText() {
+    return VIEW_TITLE;
+  }
+  getIcon() {
+    return "list-todo";
+  }
+  async onOpen() {
+    this.contentEl.addClasses(["vault-tasks-view", "markdown-reading-view"]);
+    this.ensureHeaderFilters();
+    this.registerDomEvent(this.contentEl, "change", (event) => {
+      const target = event.target;
+      if (!(target instanceof HTMLInputElement) || target.type !== "checkbox") {
+        return;
+      }
+      const key = target.dataset.taskKey;
+      if (!key) {
+        return;
+      }
+      const task = this.renderedTasks.get(key);
+      if (!task) {
+        return;
+      }
+      const nextChecked = target.checked;
+      target.disabled = true;
+      void (async () => {
+        const didUpdate = await this.plugin.toggleTask(task, nextChecked);
+        if (!didUpdate) {
+          target.checked = !nextChecked;
+        }
+        target.disabled = false;
+        this.updateHeaderControls();
+      })();
+    });
+    this.registerDomEvent(this.contentEl, "click", (event) => {
+      const target = event.target;
+      if (!(target instanceof HTMLElement)) {
+        return;
+      }
+      const linkEl = target.closest("a.internal-link");
+      if (!linkEl) {
+        return;
+      }
+      const linktext = linkEl.getAttribute("data-href");
+      if (!linktext) {
+        return;
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      void this.app.workspace.openLinkText(linktext, "/", import_obsidian4.Keymap.isModEvent(event));
+    });
+    this.registerDomEvent(this.contentEl, "contextmenu", (event) => {
+      const target = event.target;
+      if (!(target instanceof HTMLElement)) {
+        return;
+      }
+      const listItemEl = target.closest("li[data-task-key]");
+      if (!listItemEl) {
+        return;
+      }
+      const taskKey = listItemEl.getAttribute("data-task-key");
+      if (!taskKey) {
+        return;
+      }
+      const task = this.renderedTasks.get(taskKey);
+      if (!task) {
+        return;
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      this.showTaskMenu(event, listItemEl, task);
+    });
+    await this.render();
+  }
+  async onClose() {
+    var _a, _b;
+    this.archiveButtonEl = null;
+    this.connectionsButtonEl = null;
+    (_a = this.headerFilterEl) == null ? void 0 : _a.remove();
+    this.headerFilterEl = null;
+    this.filterButtons.clear();
+    this.markdownHostEl = null;
+    this.renderedTasks.clear();
+    (_b = this.renderComponent) == null ? void 0 : _b.unload();
+    this.renderComponent = null;
+    this.sectionFilterButtonEl = null;
+    this.sectionFilterChipEl = null;
+    this.contentEl.empty();
+  }
+  async render() {
+    var _a;
+    const scrollState = this.captureScrollState();
+    const snapshot = this.plugin.getSnapshot();
+    const { markdown, renderedGroups, renderedSections, renderedTasks } = buildRenderedDocument(
+      snapshot,
+      this.app.metadataCache,
+      (file) => this.plugin.getBacklinkFiles(file)
+    );
+    this.ensureHeaderFilters();
+    this.updateFilterButtons(snapshot.filter);
+    this.updateSectionFilterControls();
+    (_a = this.renderComponent) == null ? void 0 : _a.unload();
+    this.renderComponent = new import_obsidian4.Component();
+    this.addChild(this.renderComponent);
+    this.renderedTasks.clear();
+    this.contentEl.empty();
+    this.contentEl.addClasses(["vault-tasks-view", "markdown-reading-view"]);
+    this.contentEl.toggleClass(
+      "is-readable-line-width",
+      this.plugin.getReadableLineLengthEnabled()
+    );
+    this.markdownHostEl = this.contentEl.createDiv({
+      cls: [
+        "vault-tasks-view__document",
+        "markdown-preview-view",
+        "markdown-rendered"
+      ]
+    });
+    this.markdownHostEl.toggleClass(
+      "is-readable-line-width",
+      this.plugin.getReadableLineLengthEnabled()
+    );
+    const sizerEl = this.markdownHostEl.createDiv({
+      cls: ["markdown-preview-sizer", "vault-tasks-view__sizer"]
+    });
+    await import_obsidian4.MarkdownRenderer.render(this.app, markdown, sizerEl, "/", this.renderComponent);
+    const checkboxes = Array.from(
+      sizerEl.querySelectorAll("input[type='checkbox']")
+    );
+    for (const [index, checkbox] of checkboxes.entries()) {
+      const task = renderedTasks[index];
+      if (!task) {
+        continue;
+      }
+      checkbox.dataset.taskKey = task.key;
+      this.renderedTasks.set(task.key, task);
+      const listItemEl = checkbox.closest("li");
+      listItemEl == null ? void 0 : listItemEl.setAttr("data-task-key", task.key);
+      listItemEl == null ? void 0 : listItemEl.setAttr("data-scroll-anchor-kind", "task");
+      listItemEl == null ? void 0 : listItemEl.setAttr("data-scroll-anchor-key", task.key);
+      this.addJumpButton(checkbox, task);
+    }
+    const headings = Array.from(sizerEl.querySelectorAll("h2"));
+    for (const [index, headingEl] of headings.entries()) {
+      const group = renderedGroups[index];
+      if (!group) {
+        continue;
+      }
+      headingEl.setAttr("data-scroll-anchor-kind", "group");
+      headingEl.setAttr("data-scroll-anchor-key", group.file.path);
+      this.bindHeadingMenu(headingEl, group);
+      this.decorateHeadingContext(headingEl);
+    }
+    const sectionHeadings = Array.from(sizerEl.querySelectorAll("h3"));
+    for (const [index, headingEl] of sectionHeadings.entries()) {
+      const section = renderedSections[index];
+      if (!section) {
+        continue;
+      }
+      headingEl.setAttr("data-scroll-anchor-kind", "section");
+      headingEl.setAttr("data-scroll-anchor-key", this.getSectionAnchorKey(section));
+      this.bindSectionMenu(headingEl, section);
+    }
+    this.restoreScrollState(scrollState);
+  }
+  updateHeaderControls() {
+    this.ensureHeaderFilters();
+    this.updateArchiveButton();
+    this.updateConnectionsButton();
+    this.updateFilterButtons(this.plugin.getFilter());
+    this.updateSectionFilterControls();
+  }
+  ensureHeaderFilters() {
+    var _a, _b, _c;
+    if ((_a = this.headerFilterEl) == null ? void 0 : _a.isConnected) {
+      return;
+    }
+    const actionsEl = (_c = this.containerEl.querySelector(".view-actions")) != null ? _c : (_b = this.containerEl.closest(".workspace-leaf-content")) == null ? void 0 : _b.querySelector(".view-actions");
+    if (!actionsEl) {
+      return;
+    }
+    const filterEl = createDiv({ cls: "vault-tasks-view__header-filters" });
+    const filtersGroupEl = filterEl.createDiv({
+      cls: "vault-tasks-view__header-group"
+    });
+    for (const filter of ["all", "pending", "completed"]) {
+      const buttonEl = filtersGroupEl.createEl("button", {
+        cls: ["clickable-icon", "view-action", "vault-tasks-view__header-filter"],
+        attr: {
+          "data-tooltip-position": "bottom",
+          "aria-label": `Show ${filterLabel(filter)} tasks`,
+          title: `Show ${filterLabel(filter)} tasks`,
+          type: "button"
+        }
+      });
+      (0, import_obsidian4.setIcon)(buttonEl, filterIcon(filter));
+      this.registerDomEvent(buttonEl, "click", () => {
+        void this.plugin.setFilter(filter);
+      });
+      this.filterButtons.set(filter, buttonEl);
+    }
+    filterEl.createSpan({
+      cls: "vault-tasks-view__header-separator",
+      attr: { "aria-hidden": "true" }
+    });
+    const sectionGroupEl = filterEl.createDiv({
+      cls: "vault-tasks-view__header-group"
+    });
+    const sectionFilterButtonEl = sectionGroupEl.createEl("button", {
+      cls: ["clickable-icon", "view-action", "vault-tasks-view__header-filter"],
+      attr: {
+        "data-tooltip-position": "bottom",
+        "aria-label": "Filter by section",
+        title: "Filter by section",
+        type: "button"
+      }
+    });
+    (0, import_obsidian4.setIcon)(sectionFilterButtonEl, "filter");
+    this.registerDomEvent(sectionFilterButtonEl, "click", (event) => {
+      this.showSectionFilterMenu(event);
+    });
+    this.sectionFilterButtonEl = sectionFilterButtonEl;
+    const sectionFilterChipEl = sectionGroupEl.createEl("button", {
+      cls: "vault-tasks-view__header-chip is-hidden",
+      attr: {
+        "data-tooltip-position": "bottom",
+        type: "button"
+      }
+    });
+    this.registerDomEvent(sectionFilterChipEl, "click", () => {
+      void this.plugin.setSectionFilter(null);
+    });
+    this.sectionFilterChipEl = sectionFilterChipEl;
+    filterEl.createSpan({
+      cls: "vault-tasks-view__header-separator",
+      attr: { "aria-hidden": "true" }
+    });
+    const archiveGroupEl = filterEl.createDiv({
+      cls: "vault-tasks-view__header-group"
+    });
+    const archiveButtonEl = archiveGroupEl.createEl("button", {
+      cls: ["clickable-icon", "view-action", "vault-tasks-view__header-filter"],
+      attr: {
+        "data-tooltip-position": "bottom",
+        "aria-label": "Refresh task list",
+        title: "Refresh task list",
+        type: "button"
+      }
+    });
+    (0, import_obsidian4.setIcon)(archiveButtonEl, "archive");
+    this.registerDomEvent(archiveButtonEl, "click", () => {
+      void this.plugin.applyTaskChanges();
+    });
+    this.archiveButtonEl = archiveButtonEl;
+    filterEl.createSpan({
+      cls: "vault-tasks-view__header-separator",
+      attr: { "aria-hidden": "true" }
+    });
+    const connectionsGroupEl = filterEl.createDiv({
+      cls: "vault-tasks-view__header-group"
+    });
+    const connectionsButtonEl = connectionsGroupEl.createEl("button", {
+      cls: ["clickable-icon", "view-action", "vault-tasks-view__header-filter"],
+      attr: {
+        "data-tooltip-position": "bottom",
+        "aria-label": "Toggle connections context",
+        title: "Toggle connections context",
+        type: "button"
+      }
+    });
+    (0, import_obsidian4.setIcon)(connectionsButtonEl, "waypoints");
+    this.registerDomEvent(connectionsButtonEl, "click", () => {
+      void this.plugin.setShowConnections(!this.plugin.getShowConnections());
+    });
+    this.connectionsButtonEl = connectionsButtonEl;
+    const anchorEl = actionsEl.lastElementChild;
+    if (anchorEl) {
+      actionsEl.insertBefore(filterEl, anchorEl);
+    } else {
+      actionsEl.appendChild(filterEl);
+    }
+    this.headerFilterEl = filterEl;
+    this.updateHeaderControls();
+  }
+  updateFilterButtons(activeFilter) {
+    for (const [filter, buttonEl] of this.filterButtons.entries()) {
+      buttonEl.toggleClass("is-active", filter === activeFilter);
+      buttonEl.setAttr("aria-pressed", filter === activeFilter ? "true" : "false");
+    }
+  }
+  updateSectionFilterControls() {
+    if (this.sectionFilterButtonEl) {
+      const hasSectionFilter = this.plugin.getSectionFilter() !== null;
+      this.sectionFilterButtonEl.toggleClass("is-active", hasSectionFilter);
+      this.sectionFilterButtonEl.setAttr("aria-pressed", hasSectionFilter ? "true" : "false");
+    }
+    if (!this.sectionFilterChipEl) {
+      return;
+    }
+    const sectionFilter = this.plugin.getSectionFilter();
+    const label = (sectionFilter == null ? void 0 : sectionFilter.kind) === "none" ? "No section" : (sectionFilter == null ? void 0 : sectionFilter.kind) === "heading" ? sectionFilter.heading : null;
+    if (!label) {
+      this.sectionFilterChipEl.addClass("is-hidden");
+      this.sectionFilterChipEl.empty();
+      this.sectionFilterChipEl.removeAttribute("aria-label");
+      this.sectionFilterChipEl.removeAttribute("title");
+      return;
+    }
+    this.sectionFilterChipEl.removeClass("is-hidden");
+    this.sectionFilterChipEl.setText(label);
+    this.sectionFilterChipEl.setAttr("aria-label", `Clear section filter: ${label}`);
+    this.sectionFilterChipEl.setAttr("title", `Clear section filter: ${label}`);
+  }
+  updateArchiveButton() {
+    if (!this.archiveButtonEl) {
+      return;
+    }
+    const hasPendingRefresh = this.plugin.hasPendingManualRefresh();
+    this.archiveButtonEl.toggleClass("is-active", hasPendingRefresh);
+    this.archiveButtonEl.setAttr("aria-pressed", hasPendingRefresh ? "true" : "false");
+  }
+  updateConnectionsButton() {
+    if (!this.connectionsButtonEl) {
+      return;
+    }
+    const showConnections = this.plugin.getShowConnections();
+    this.connectionsButtonEl.toggleClass("is-active", showConnections);
+    this.connectionsButtonEl.setAttr("aria-pressed", showConnections ? "true" : "false");
+  }
+  showSectionFilterMenu(event) {
+    event.preventDefault();
+    event.stopPropagation();
+    const menu = new import_obsidian4.Menu();
+    const activeFilter = this.plugin.getSectionFilter();
+    const availableFilters = this.plugin.getAvailableSectionFilters(this.plugin.getFilter());
+    menu.addItem((item) => {
+      item.setTitle("All sections").setIcon("list").setChecked(activeFilter === null).onClick(() => {
+        void this.plugin.setSectionFilter(null);
+      });
+    });
+    if (availableFilters.hasNoSection || (activeFilter == null ? void 0 : activeFilter.kind) === "none") {
+      menu.addItem((item) => {
+        item.setTitle("No section").setChecked((activeFilter == null ? void 0 : activeFilter.kind) === "none").onClick(() => {
+          void this.plugin.setSectionFilter({ kind: "none" });
+        });
+      });
+    }
+    const sectionHeadings = new Set(availableFilters.headings);
+    if ((activeFilter == null ? void 0 : activeFilter.kind) === "heading") {
+      sectionHeadings.add(activeFilter.heading);
+    }
+    const sortedHeadings = Array.from(sectionHeadings).sort(
+      (left, right) => left.localeCompare(right)
+    );
+    if (sortedHeadings.length > 0) {
+      menu.addSeparator();
+      for (const heading of sortedHeadings) {
+        menu.addItem((item) => {
+          item.setTitle(heading).setChecked((activeFilter == null ? void 0 : activeFilter.kind) === "heading" && activeFilter.heading === heading).onClick(() => {
+            void this.plugin.setSectionFilter({ kind: "heading", heading });
+          });
+        });
+      }
+    } else if (!availableFilters.hasNoSection && activeFilter === null) {
+      menu.addSeparator();
+      menu.addItem((item) => {
+        item.setTitle("No sections available").setDisabled(true);
+      });
+    }
+    menu.showAtMouseEvent(event);
+  }
+  captureScrollState() {
+    const scrollTop = this.contentEl.scrollTop;
+    const anchorEls = Array.from(
+      this.contentEl.querySelectorAll(
+        "[data-scroll-anchor-kind][data-scroll-anchor-key]"
+      )
+    );
+    if (anchorEls.length === 0) {
+      return {
+        fallbackAnchor: null,
+        primaryAnchor: null,
+        scrollTop
+      };
+    }
+    const viewportTop = this.contentEl.getBoundingClientRect().top;
+    let primaryIndex = anchorEls.findIndex(
+      (anchorEl) => anchorEl.getBoundingClientRect().bottom > viewportTop
+    );
+    if (primaryIndex === -1) {
+      primaryIndex = anchorEls.length - 1;
+    }
+    return {
+      fallbackAnchor: primaryIndex > 0 ? this.buildScrollAnchor(anchorEls[primaryIndex - 1], viewportTop) : null,
+      primaryAnchor: this.buildScrollAnchor(anchorEls[primaryIndex], viewportTop),
+      scrollTop
+    };
+  }
+  buildScrollAnchor(anchorEl, viewportTop) {
+    const type = anchorEl.getAttribute("data-scroll-anchor-kind");
+    const key = anchorEl.getAttribute("data-scroll-anchor-key");
+    if (!key || type !== "group" && type !== "section" && type !== "task") {
+      return null;
+    }
+    return {
+      key,
+      offset: anchorEl.getBoundingClientRect().top - viewportTop,
+      type
+    };
+  }
+  restoreScrollState(scrollState) {
+    const anchor = scrollState.primaryAnchor && this.findScrollAnchorElement(scrollState.primaryAnchor) ? scrollState.primaryAnchor : scrollState.fallbackAnchor && this.findScrollAnchorElement(scrollState.fallbackAnchor) ? scrollState.fallbackAnchor : null;
+    if (!anchor) {
+      this.contentEl.scrollTop = this.clampScrollTop(scrollState.scrollTop);
+      return;
+    }
+    const anchorEl = this.findScrollAnchorElement(anchor);
+    if (!anchorEl) {
+      this.contentEl.scrollTop = this.clampScrollTop(scrollState.scrollTop);
+      return;
+    }
+    const viewportTop = this.contentEl.getBoundingClientRect().top;
+    const currentOffset = anchorEl.getBoundingClientRect().top - viewportTop;
+    this.contentEl.scrollTop = this.clampScrollTop(
+      this.contentEl.scrollTop + currentOffset - anchor.offset
+    );
+  }
+  findScrollAnchorElement(anchor) {
+    var _a;
+    return (_a = Array.from(
+      this.contentEl.querySelectorAll(
+        "[data-scroll-anchor-kind][data-scroll-anchor-key]"
+      )
+    ).find(
+      (anchorEl) => anchorEl.getAttribute("data-scroll-anchor-kind") === anchor.type && anchorEl.getAttribute("data-scroll-anchor-key") === anchor.key
+    )) != null ? _a : null;
+  }
+  clampScrollTop(scrollTop) {
+    const maxScrollTop = Math.max(0, this.contentEl.scrollHeight - this.contentEl.clientHeight);
+    return Math.max(0, Math.min(maxScrollTop, scrollTop));
+  }
+  getSectionAnchorKey(section) {
+    return `${section.file.path}:${section.line}`;
+  }
+  addJumpButton(checkboxEl, task) {
+    const listItemEl = checkboxEl.closest("li");
+    if (!listItemEl) {
+      return;
+    }
+    const jumpButtonEl = createEl("span", {
+      cls: "vault-tasks-view__task-jump",
+      text: "\u2197",
+      attr: {
+        "aria-label": `Open task source in ${task.file.basename}`,
+        "data-tooltip-position": "bottom",
+        role: "button",
+        tabindex: "0",
+        title: `Open ${task.file.basename} at line ${task.line + 1}`
+      }
+    });
+    this.registerDomEvent(jumpButtonEl, "click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      void this.plugin.openTask(task);
+    });
+    this.registerDomEvent(jumpButtonEl, "keydown", (event) => {
+      if (event.key !== "Enter" && event.key !== " ") {
+        return;
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      void this.plugin.openTask(task);
+    });
+    listItemEl.appendChild(jumpButtonEl);
+  }
+  applyTaskStatusToElement(listItemEl, task) {
+    const checkboxEl = listItemEl.querySelector("input[type='checkbox']");
+    if (!checkboxEl) {
+      return;
+    }
+    checkboxEl.checked = isCheckboxCheckedStatus(task.statusSymbol);
+    listItemEl.toggleClass("is-checked", checkboxEl.checked);
+    if (task.statusSymbol === TASK_STATUS_TODO) {
+      listItemEl.removeAttribute("data-task");
+      return;
+    }
+    listItemEl.setAttr("data-task", task.statusSymbol);
+  }
+  showTaskMenu(event, listItemEl, task) {
+    const menu = new import_obsidian4.Menu();
+    menu.addItem((item) => {
+      item.setTitle("Open source").setIcon("file-text").onClick(() => {
+        void this.plugin.openTask(task);
+      });
+    });
+    menu.addItem((item) => {
+      item.setTitle("Copy text").setIcon("copy").onClick(() => {
+        void this.plugin.copyToClipboard(task.text, "Copied task text.");
+      });
+    });
+    menu.addItem((item) => {
+      item.setTitle("Copy task line").setIcon("copy").onClick(() => {
+        void this.plugin.copyToClipboard(task.rawLine.trim(), "Copied task line.");
+      });
+    });
+    menu.addItem((item) => {
+      item.setTitle("Copy note path").setIcon("copy").onClick(() => {
+        void this.plugin.copyToClipboard(task.file.path, "Copied note path.");
+      });
+    });
+    menu.addSeparator();
+    const statusActions = this.plugin.getSettings().statusMode === "standard" ? [
+      { title: "Todo", icon: "circle", symbol: TASK_STATUS_TODO },
+      { title: "Done", icon: "check", symbol: TASK_STATUS_DONE }
+    ] : [
+      { title: "Todo", icon: "circle", symbol: TASK_STATUS_TODO },
+      { title: "In progress", icon: "loader", symbol: TASK_STATUS_IN_PROGRESS },
+      { title: "Done", icon: "check", symbol: TASK_STATUS_DONE },
+      { title: "Cancelled", icon: "minus", symbol: TASK_STATUS_CANCELLED },
+      { title: "Deferred", icon: "fast-forward", symbol: TASK_STATUS_DEFERRED }
+    ];
+    for (const statusAction of statusActions) {
+      menu.addItem((item) => {
+        const disableCancelled = statusAction.symbol === TASK_STATUS_CANCELLED && isCheckboxCheckedStatus(task.statusSymbol) && task.statusSymbol !== TASK_STATUS_CANCELLED;
+        item.setTitle(statusAction.title).setIcon(statusAction.icon).setChecked(task.statusSymbol === statusAction.symbol).setDisabled(disableCancelled).onClick(() => {
+          void (async () => {
+            const didUpdate = await this.plugin.setTaskStatus(task, statusAction.symbol);
+            if (!didUpdate) {
+              return;
+            }
+            this.applyTaskStatusToElement(listItemEl, task);
+          })();
+        });
+      });
+    }
+    menu.showAtMouseEvent(event);
+  }
+  bindHeadingMenu(headingEl, group) {
+    const titleLinkEl = headingEl.querySelector("a.internal-link");
+    if (!titleLinkEl) {
+      return;
+    }
+    this.registerDomEvent(titleLinkEl, "contextmenu", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      const menu = new import_obsidian4.Menu();
+      menu.addItem((item) => {
+        item.setTitle("Open").setIcon("file-text").onClick(() => {
+          void this.plugin.openNote(group.file);
+        });
+      });
+      menu.addItem((item) => {
+        item.setTitle("Copy name").setIcon("copy").onClick(() => {
+          void this.plugin.copyToClipboard(group.noteTitle, "Copied note name.");
+        });
+      });
+      menu.addItem((item) => {
+        item.setTitle("Copy path").setIcon("copy").onClick(() => {
+          void this.plugin.copyToClipboard(group.file.path, "Copied note path.");
+        });
+      });
+      menu.addItem((item) => {
+        item.setTitle("Copy wiki link").setIcon("link").onClick(() => {
+          const linkText = this.app.metadataCache.fileToLinktext(group.file, "/", true);
+          void this.plugin.copyToClipboard(`[[${linkText}]]`, "Copied wiki link.");
+        });
+      });
+      menu.addSeparator();
+      menu.addItem((item) => {
+        item.setTitle("Complete all").setIcon("check").onClick(() => {
+          void this.plugin.setTasksStatus(group.tasks, TASK_STATUS_DONE);
+        });
+      });
+      if (this.plugin.getSettings().statusMode === "extended") {
+        menu.addItem((item) => {
+          item.setTitle("Cancel pending").setIcon("minus").onClick(() => {
+            void this.plugin.setTasksStatus(group.tasks, TASK_STATUS_CANCELLED, {
+              onlyUnchecked: true
+            });
+          });
+        });
+      }
+      menu.addSeparator();
+      menu.addItem((item) => {
+        item.setTitle("Defer until").setIcon("calendar-days").onClick(() => {
+          new DeferUntilModal(
+            this.app,
+            group.noteTitle,
+            group.deferredUntil,
+            async (deferredUntil) => {
+              await this.plugin.setDeferredUntil(group.file, deferredUntil);
+            }
+          ).open();
+        });
+      });
+      menu.addSeparator();
+      menu.addItem((item) => {
+        item.setTitle("Hide").setIcon("eye-off").onClick(() => {
+          void this.plugin.hideFromTaskList(group.file);
+        });
+      });
+      menu.showAtMouseEvent(event);
+    });
+  }
+  bindSectionMenu(headingEl, section) {
+    this.registerDomEvent(headingEl, "contextmenu", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      const activeSectionFilter = this.plugin.getSectionFilter();
+      const menu = new import_obsidian4.Menu();
+      menu.addItem((item) => {
+        item.setTitle("Show only this section").setIcon("filter").setChecked(
+          (activeSectionFilter == null ? void 0 : activeSectionFilter.kind) === "heading" && activeSectionFilter.heading === section.heading
+        ).onClick(() => {
+          void this.plugin.setSectionFilter({
+            kind: "heading",
+            heading: section.heading
+          });
+        });
+      });
+      menu.addSeparator();
+      menu.addItem((item) => {
+        item.setTitle("Complete all").setIcon("check").onClick(() => {
+          void this.plugin.setTasksStatus(section.tasks, TASK_STATUS_DONE);
+        });
+      });
+      if (this.plugin.getSettings().statusMode === "extended") {
+        menu.addItem((item) => {
+          item.setTitle("Cancel pending").setIcon("minus").onClick(() => {
+            void this.plugin.setTasksStatus(section.tasks, TASK_STATUS_CANCELLED, {
+              onlyUnchecked: true
+            });
+          });
+        });
+      }
+      menu.showAtMouseEvent(event);
+    });
+  }
+  decorateHeadingContext(headingEl) {
+    var _a, _b, _c;
+    const headingBlockEl = (_a = headingEl.closest(".el-h2")) != null ? _a : headingEl;
+    let nextBlockEl = headingBlockEl.nextElementSibling;
+    while (nextBlockEl) {
+      const paragraphEl = nextBlockEl instanceof HTMLParagraphElement ? nextBlockEl : nextBlockEl.querySelector(":scope > p");
+      if (!(paragraphEl instanceof HTMLParagraphElement)) {
+        return;
+      }
+      const text = (_c = (_b = paragraphEl.textContent) == null ? void 0 : _b.trim()) != null ? _c : "";
+      if (text.startsWith("Deferred until:")) {
+        paragraphEl.addClass("vault-tasks-view__deferred");
+        nextBlockEl = nextBlockEl.nextElementSibling;
+        continue;
+      }
+      if (text.startsWith("Related to:")) {
+        paragraphEl.addClass("vault-tasks-view__connections");
+        const linkEls = Array.from(
+          paragraphEl.querySelectorAll("a.internal-link")
+        );
+        for (const linkEl of linkEls) {
+          linkEl.addClass("vault-tasks-view__connections-link");
+        }
+        nextBlockEl = nextBlockEl.nextElementSibling;
+        continue;
+      }
+      return;
+    }
+  }
+};
+
+// src/plugin.ts
+var VaultTasksPlugin = class extends import_obsidian5.Plugin {
   constructor() {
     super(...arguments);
     this.autoRefreshPaused = false;
@@ -88,9 +1737,9 @@ var VaultTasksPlugin = class extends import_obsidian.Plugin {
     this.queuedRefresh = false;
     this.refreshing = false;
     this.sectionFilter = null;
-    this.settings = DEFAULT_SETTINGS;
+    this.settings = normalizeSettings(null);
     this.showConnections = false;
-    this.scheduleRefresh = (0, import_obsidian.debounce)(() => {
+    this.scheduleRefresh = (0, import_obsidian5.debounce)(() => {
       void this.refreshIndex();
     }, 250, true);
   }
@@ -262,7 +1911,7 @@ var VaultTasksPlugin = class extends import_obsidian.Plugin {
         continue;
       }
       for (const task of group.tasks) {
-        if (!matchesFilter(task, filter, this.settings)) {
+        if (!matchesFilter2(task, filter, this.settings)) {
           continue;
         }
         if (task.sectionHeading === null) {
@@ -293,10 +1942,10 @@ var VaultTasksPlugin = class extends import_obsidian.Plugin {
   async copyToClipboard(text, successMessage) {
     try {
       await window.navigator.clipboard.writeText(text);
-      new import_obsidian.Notice(successMessage);
+      new import_obsidian5.Notice(successMessage);
     } catch (error) {
       const message = error instanceof Error ? error.message : "Could not copy to the clipboard.";
-      new import_obsidian.Notice(message);
+      new import_obsidian5.Notice(message);
     }
   }
   async openNote(file) {
@@ -307,7 +1956,7 @@ var VaultTasksPlugin = class extends import_obsidian.Plugin {
   async openTask(task) {
     var _a;
     await this.openNote(task.file);
-    const view = this.app.workspace.getActiveViewOfType(import_obsidian.MarkdownView);
+    const view = this.app.workspace.getActiveViewOfType(import_obsidian5.MarkdownView);
     if (!view || ((_a = view.file) == null ? void 0 : _a.path) !== task.file.path) {
       return;
     }
@@ -326,7 +1975,7 @@ var VaultTasksPlugin = class extends import_obsidian.Plugin {
     var _a;
     try {
       this.autoRefreshPaused = true;
-      const activeView = this.app.workspace.getActiveViewOfType(import_obsidian.MarkdownView);
+      const activeView = this.app.workspace.getActiveViewOfType(import_obsidian5.MarkdownView);
       if (((_a = activeView == null ? void 0 : activeView.file) == null ? void 0 : _a.path) === task.file.path) {
         this.setTaskStatusInEditor(activeView.editor, task, statusSymbol);
       } else {
@@ -336,7 +1985,6 @@ var VaultTasksPlugin = class extends import_obsidian.Plugin {
       }
       const nextLine = setTaskStatusSymbol(task.rawLine, statusSymbol);
       if (nextLine !== null) {
-        task.completed = isCheckboxCheckedStatus(statusSymbol);
         task.rawLine = nextLine;
         task.renderedLine = nextLine.trimStart();
         task.statusSymbol = statusSymbol;
@@ -346,7 +1994,7 @@ var VaultTasksPlugin = class extends import_obsidian.Plugin {
       return true;
     } catch (error) {
       const message = error instanceof Error ? error.message : "Could not update the task.";
-      new import_obsidian.Notice(message);
+      new import_obsidian5.Notice(message);
       if (!this.manualRefreshRequired) {
         this.autoRefreshPaused = false;
       }
@@ -375,8 +2023,8 @@ var VaultTasksPlugin = class extends import_obsidian.Plugin {
       void this.refreshIndex();
     }
   }
-  async toggleTask(task, completed) {
-    return this.setTaskStatus(task, completed ? TASK_STATUS_DONE : TASK_STATUS_TODO);
+  async toggleTask(task, checked) {
+    return this.setTaskStatus(task, checked ? TASK_STATUS_DONE : TASK_STATUS_TODO);
   }
   async setDeferredUntil(file, deferredUntil) {
     try {
@@ -387,7 +2035,7 @@ var VaultTasksPlugin = class extends import_obsidian.Plugin {
       await this.refreshIndex();
     } catch (error) {
       const message = error instanceof Error ? error.message : "Could not update the defer-until date.";
-      new import_obsidian.Notice(message);
+      new import_obsidian5.Notice(message);
     }
   }
   async hideFromTaskList(file) {
@@ -396,12 +2044,12 @@ var VaultTasksPlugin = class extends import_obsidian.Plugin {
         frontmatter[HIDDEN_FROM_TASKS_KEY] = true;
       });
       await this.refreshIndex();
-      new import_obsidian.Notice(
+      new import_obsidian5.Notice(
         `Hidden from vault tasks. Remove \`${HIDDEN_FROM_TASKS_KEY}: true\` to show it again.`
       );
     } catch (error) {
       const message = error instanceof Error ? error.message : "Could not hide the note from the task list.";
-      new import_obsidian.Notice(message);
+      new import_obsidian5.Notice(message);
     }
   }
   async setTasksStatus(tasks, statusSymbol, options) {
@@ -414,7 +2062,7 @@ var VaultTasksPlugin = class extends import_obsidian.Plugin {
     const file = tasks[0].file;
     try {
       this.autoRefreshPaused = true;
-      const activeView = this.app.workspace.getActiveViewOfType(import_obsidian.MarkdownView);
+      const activeView = this.app.workspace.getActiveViewOfType(import_obsidian5.MarkdownView);
       if (((_a = activeView == null ? void 0 : activeView.file) == null ? void 0 : _a.path) === file.path) {
         updatedCount = updateSpecificTasksInEditor(activeView.editor, tasks, statusSymbol, {
           onlyUnchecked
@@ -432,7 +2080,7 @@ var VaultTasksPlugin = class extends import_obsidian.Plugin {
       this.manualRefreshRequired = false;
       await this.updateHeaderControls();
       if (updatedCount === 0) {
-        new import_obsidian.Notice(
+        new import_obsidian5.Notice(
           statusSymbol === TASK_STATUS_CANCELLED ? "No pending tasks to cancel." : "No tasks needed updating."
         );
         return;
@@ -441,37 +2089,7 @@ var VaultTasksPlugin = class extends import_obsidian.Plugin {
     } catch (error) {
       this.autoRefreshPaused = false;
       const message = error instanceof Error ? error.message : "Could not update the selected tasks.";
-      new import_obsidian.Notice(message);
-      await this.updateHeaderControls();
-    }
-  }
-  async setAllTasksCompletion(file, completed) {
-    var _a;
-    let updatedCount = 0;
-    try {
-      this.autoRefreshPaused = true;
-      const activeView = this.app.workspace.getActiveViewOfType(import_obsidian.MarkdownView);
-      if (((_a = activeView == null ? void 0 : activeView.file) == null ? void 0 : _a.path) === file.path) {
-        updatedCount = updateAllTasksInEditor(activeView.editor, completed);
-      } else {
-        await this.app.vault.process(file, (content) => {
-          const result = updateAllTasksInContent(content, completed);
-          updatedCount = result.updatedCount;
-          return result.content;
-        });
-      }
-      this.autoRefreshPaused = false;
-      this.manualRefreshRequired = false;
-      await this.updateHeaderControls();
-      if (updatedCount === 0) {
-        new import_obsidian.Notice(completed ? "No open tasks to complete." : "No completed tasks to cancel.");
-        return;
-      }
-      await this.refreshIndex();
-    } catch (error) {
-      this.autoRefreshPaused = false;
-      const message = error instanceof Error ? error.message : "Could not update the tasks in this note.";
-      new import_obsidian.Notice(message);
+      new import_obsidian5.Notice(message);
       await this.updateHeaderControls();
     }
   }
@@ -505,7 +2123,7 @@ var VaultTasksPlugin = class extends import_obsidian.Plugin {
     return groups.filter((group) => group.tasks.length > 0 && !group.hiddenFromTaskList).sort((left, right) => left.file.path.localeCompare(right.file.path));
   }
   isMarkdownFile(file) {
-    return file instanceof import_obsidian.TFile && file.extension === "md";
+    return file instanceof import_obsidian5.TFile && file.extension === "md";
   }
   getBacklinkFiles(file) {
     var _a;
@@ -516,7 +2134,7 @@ var VaultTasksPlugin = class extends import_obsidian.Plugin {
         continue;
       }
       const sourceFile = this.app.vault.getAbstractFileByPath(sourcePath);
-      if (sourceFile instanceof import_obsidian.TFile && sourceFile.extension === "md" && matchesFolderScope(sourceFile.path, this.settings) && !isHiddenFromTaskListFrontmatter((_a = this.app.metadataCache.getFileCache(sourceFile)) == null ? void 0 : _a.frontmatter)) {
+      if (sourceFile instanceof import_obsidian5.TFile && sourceFile.extension === "md" && matchesFolderScope(sourceFile.path, this.settings) && !isHiddenFromTaskListFrontmatter((_a = this.app.metadataCache.getFileCache(sourceFile)) == null ? void 0 : _a.frontmatter)) {
         backlinks.set(sourceFile.path, sourceFile);
       }
     }
@@ -568,1559 +2186,3 @@ var VaultTasksPlugin = class extends import_obsidian.Plugin {
     editor.setLine(targetLine, nextLine);
   }
 };
-var VaultTasksView = class extends import_obsidian.ItemView {
-  constructor(leaf, plugin) {
-    super(leaf);
-    this.plugin = plugin;
-    this.archiveButtonEl = null;
-    this.connectionsButtonEl = null;
-    this.filterButtons = /* @__PURE__ */ new Map();
-    this.headerFilterEl = null;
-    this.markdownHostEl = null;
-    this.renderComponent = null;
-    this.renderedTasks = /* @__PURE__ */ new Map();
-    this.sectionFilterButtonEl = null;
-    this.sectionFilterChipEl = null;
-  }
-  getViewType() {
-    return VIEW_TYPE_TASKS;
-  }
-  getDisplayText() {
-    return VIEW_TITLE;
-  }
-  getIcon() {
-    return "list-todo";
-  }
-  async onOpen() {
-    this.contentEl.addClasses(["vault-tasks-view", "markdown-reading-view"]);
-    this.ensureHeaderFilters();
-    this.registerDomEvent(this.contentEl, "change", (event) => {
-      const target = event.target;
-      if (!(target instanceof HTMLInputElement) || target.type !== "checkbox") {
-        return;
-      }
-      const key = target.dataset.taskKey;
-      if (!key) {
-        return;
-      }
-      const task = this.renderedTasks.get(key);
-      if (!task) {
-        return;
-      }
-      const nextChecked = target.checked;
-      target.disabled = true;
-      void (async () => {
-        const didUpdate = await this.plugin.toggleTask(task, nextChecked);
-        if (!didUpdate) {
-          target.checked = !nextChecked;
-        }
-        target.disabled = false;
-        this.updateHeaderControls();
-      })();
-    });
-    this.registerDomEvent(this.contentEl, "click", (event) => {
-      const target = event.target;
-      if (!(target instanceof HTMLElement)) {
-        return;
-      }
-      const linkEl = target.closest("a.internal-link");
-      if (!linkEl) {
-        return;
-      }
-      const linktext = linkEl.getAttribute("data-href");
-      if (!linktext) {
-        return;
-      }
-      event.preventDefault();
-      event.stopPropagation();
-      void this.app.workspace.openLinkText(linktext, "/", import_obsidian.Keymap.isModEvent(event));
-    });
-    this.registerDomEvent(this.contentEl, "contextmenu", (event) => {
-      const target = event.target;
-      if (!(target instanceof HTMLElement)) {
-        return;
-      }
-      const listItemEl = target.closest("li[data-task-key]");
-      if (!listItemEl) {
-        return;
-      }
-      const taskKey = listItemEl.getAttribute("data-task-key");
-      if (!taskKey) {
-        return;
-      }
-      const task = this.renderedTasks.get(taskKey);
-      if (!task) {
-        return;
-      }
-      event.preventDefault();
-      event.stopPropagation();
-      this.showTaskMenu(event, listItemEl, task);
-    });
-    await this.render();
-  }
-  async onClose() {
-    var _a, _b;
-    this.archiveButtonEl = null;
-    this.connectionsButtonEl = null;
-    (_a = this.headerFilterEl) == null ? void 0 : _a.remove();
-    this.headerFilterEl = null;
-    this.filterButtons.clear();
-    this.markdownHostEl = null;
-    this.renderedTasks.clear();
-    (_b = this.renderComponent) == null ? void 0 : _b.unload();
-    this.renderComponent = null;
-    this.sectionFilterButtonEl = null;
-    this.sectionFilterChipEl = null;
-    this.contentEl.empty();
-  }
-  async render() {
-    var _a;
-    const scrollState = this.captureScrollState();
-    const snapshot = this.plugin.getSnapshot();
-    const { markdown, renderedGroups, renderedSections, renderedTasks } = buildRenderedDocument(
-      snapshot,
-      this.app.metadataCache,
-      (file) => this.plugin.getBacklinkFiles(file)
-    );
-    this.ensureHeaderFilters();
-    this.updateFilterButtons(snapshot.filter);
-    this.updateSectionFilterControls();
-    (_a = this.renderComponent) == null ? void 0 : _a.unload();
-    this.renderComponent = new import_obsidian.Component();
-    this.addChild(this.renderComponent);
-    this.renderedTasks.clear();
-    this.contentEl.empty();
-    this.contentEl.addClasses(["vault-tasks-view", "markdown-reading-view"]);
-    this.contentEl.toggleClass(
-      "is-readable-line-width",
-      this.plugin.getReadableLineLengthEnabled()
-    );
-    this.markdownHostEl = this.contentEl.createDiv({
-      cls: [
-        "vault-tasks-view__document",
-        "markdown-preview-view",
-        "markdown-rendered"
-      ]
-    });
-    this.markdownHostEl.toggleClass(
-      "is-readable-line-width",
-      this.plugin.getReadableLineLengthEnabled()
-    );
-    const sizerEl = this.markdownHostEl.createDiv({
-      cls: ["markdown-preview-sizer", "vault-tasks-view__sizer"]
-    });
-    await import_obsidian.MarkdownRenderer.render(this.app, markdown, sizerEl, "/", this.renderComponent);
-    const checkboxes = Array.from(sizerEl.querySelectorAll("input[type='checkbox']"));
-    for (const [index, checkbox] of checkboxes.entries()) {
-      const task = renderedTasks[index];
-      if (!task) {
-        continue;
-      }
-      checkbox.dataset.taskKey = task.key;
-      this.renderedTasks.set(task.key, task);
-      const listItemEl = checkbox.closest("li");
-      listItemEl == null ? void 0 : listItemEl.setAttr("data-task-key", task.key);
-      listItemEl == null ? void 0 : listItemEl.setAttr("data-scroll-anchor-kind", "task");
-      listItemEl == null ? void 0 : listItemEl.setAttr("data-scroll-anchor-key", task.key);
-      this.addJumpButton(checkbox, task);
-    }
-    const headings = Array.from(sizerEl.querySelectorAll("h2"));
-    for (const [index, headingEl] of headings.entries()) {
-      const group = renderedGroups[index];
-      if (!group) {
-        continue;
-      }
-      headingEl.setAttr("data-scroll-anchor-kind", "group");
-      headingEl.setAttr("data-scroll-anchor-key", group.file.path);
-      this.bindHeadingMenu(headingEl, group);
-      this.decorateHeadingContext(headingEl);
-    }
-    const sectionHeadings = Array.from(sizerEl.querySelectorAll("h3"));
-    for (const [index, headingEl] of sectionHeadings.entries()) {
-      const section = renderedSections[index];
-      if (!section) {
-        continue;
-      }
-      headingEl.setAttr("data-scroll-anchor-kind", "section");
-      headingEl.setAttr("data-scroll-anchor-key", this.getSectionAnchorKey(section));
-      this.bindSectionMenu(headingEl, section);
-    }
-    this.restoreScrollState(scrollState);
-  }
-  updateHeaderControls() {
-    this.ensureHeaderFilters();
-    this.updateArchiveButton();
-    this.updateConnectionsButton();
-    this.updateFilterButtons(this.plugin.getFilter());
-    this.updateSectionFilterControls();
-  }
-  ensureHeaderFilters() {
-    var _a, _b, _c;
-    if ((_a = this.headerFilterEl) == null ? void 0 : _a.isConnected) {
-      return;
-    }
-    const actionsEl = (_c = this.containerEl.querySelector(".view-actions")) != null ? _c : (_b = this.containerEl.closest(".workspace-leaf-content")) == null ? void 0 : _b.querySelector(".view-actions");
-    if (!actionsEl) {
-      return;
-    }
-    const filterEl = createDiv({ cls: "vault-tasks-view__header-filters" });
-    const filtersGroupEl = filterEl.createDiv({
-      cls: "vault-tasks-view__header-group"
-    });
-    for (const filter of ["all", "pending", "completed"]) {
-      const buttonEl = filtersGroupEl.createEl("button", {
-        cls: ["clickable-icon", "view-action", "vault-tasks-view__header-filter"],
-        attr: {
-          "data-tooltip-position": "bottom",
-          "aria-label": `Show ${filterLabel(filter)} tasks`,
-          title: `Show ${filterLabel(filter)} tasks`,
-          type: "button"
-        }
-      });
-      (0, import_obsidian.setIcon)(buttonEl, filterIcon(filter));
-      this.registerDomEvent(buttonEl, "click", () => {
-        void this.plugin.setFilter(filter);
-      });
-      this.filterButtons.set(filter, buttonEl);
-    }
-    filterEl.createSpan({
-      cls: "vault-tasks-view__header-separator",
-      attr: { "aria-hidden": "true" }
-    });
-    const sectionGroupEl = filterEl.createDiv({
-      cls: "vault-tasks-view__header-group"
-    });
-    const sectionFilterButtonEl = sectionGroupEl.createEl("button", {
-      cls: ["clickable-icon", "view-action", "vault-tasks-view__header-filter"],
-      attr: {
-        "data-tooltip-position": "bottom",
-        "aria-label": "Filter by section",
-        title: "Filter by section",
-        type: "button"
-      }
-    });
-    (0, import_obsidian.setIcon)(sectionFilterButtonEl, "filter");
-    this.registerDomEvent(sectionFilterButtonEl, "click", (event) => {
-      this.showSectionFilterMenu(event);
-    });
-    this.sectionFilterButtonEl = sectionFilterButtonEl;
-    const sectionFilterChipEl = sectionGroupEl.createEl("button", {
-      cls: "vault-tasks-view__header-chip is-hidden",
-      attr: {
-        "data-tooltip-position": "bottom",
-        type: "button"
-      }
-    });
-    this.registerDomEvent(sectionFilterChipEl, "click", () => {
-      void this.plugin.setSectionFilter(null);
-    });
-    this.sectionFilterChipEl = sectionFilterChipEl;
-    filterEl.createSpan({
-      cls: "vault-tasks-view__header-separator",
-      attr: { "aria-hidden": "true" }
-    });
-    const archiveGroupEl = filterEl.createDiv({
-      cls: "vault-tasks-view__header-group"
-    });
-    const archiveButtonEl = archiveGroupEl.createEl("button", {
-      cls: ["clickable-icon", "view-action", "vault-tasks-view__header-filter"],
-      attr: {
-        "data-tooltip-position": "bottom",
-        "aria-label": "Refresh task list",
-        title: "Refresh task list",
-        type: "button"
-      }
-    });
-    (0, import_obsidian.setIcon)(archiveButtonEl, "archive");
-    this.registerDomEvent(archiveButtonEl, "click", () => {
-      void this.plugin.applyTaskChanges();
-    });
-    this.archiveButtonEl = archiveButtonEl;
-    filterEl.createSpan({
-      cls: "vault-tasks-view__header-separator",
-      attr: { "aria-hidden": "true" }
-    });
-    const connectionsGroupEl = filterEl.createDiv({
-      cls: "vault-tasks-view__header-group"
-    });
-    const connectionsButtonEl = connectionsGroupEl.createEl("button", {
-      cls: ["clickable-icon", "view-action", "vault-tasks-view__header-filter"],
-      attr: {
-        "data-tooltip-position": "bottom",
-        "aria-label": "Toggle connections context",
-        title: "Toggle connections context",
-        type: "button"
-      }
-    });
-    (0, import_obsidian.setIcon)(connectionsButtonEl, "waypoints");
-    this.registerDomEvent(connectionsButtonEl, "click", () => {
-      void this.plugin.setShowConnections(!this.plugin.getShowConnections());
-    });
-    this.connectionsButtonEl = connectionsButtonEl;
-    const anchorEl = actionsEl.lastElementChild;
-    if (anchorEl) {
-      actionsEl.insertBefore(filterEl, anchorEl);
-    } else {
-      actionsEl.appendChild(filterEl);
-    }
-    this.headerFilterEl = filterEl;
-    this.updateHeaderControls();
-  }
-  updateFilterButtons(activeFilter) {
-    for (const [filter, buttonEl] of this.filterButtons.entries()) {
-      buttonEl.toggleClass("is-active", filter === activeFilter);
-      buttonEl.setAttr("aria-pressed", filter === activeFilter ? "true" : "false");
-    }
-  }
-  updateSectionFilterControls() {
-    if (this.sectionFilterButtonEl) {
-      const hasSectionFilter = this.plugin.getSectionFilter() !== null;
-      this.sectionFilterButtonEl.toggleClass("is-active", hasSectionFilter);
-      this.sectionFilterButtonEl.setAttr("aria-pressed", hasSectionFilter ? "true" : "false");
-    }
-    if (!this.sectionFilterChipEl) {
-      return;
-    }
-    const sectionFilter = this.plugin.getSectionFilter();
-    const label = getSectionFilterLabel(sectionFilter);
-    if (!label) {
-      this.sectionFilterChipEl.addClass("is-hidden");
-      this.sectionFilterChipEl.empty();
-      this.sectionFilterChipEl.removeAttribute("aria-label");
-      this.sectionFilterChipEl.removeAttribute("title");
-      return;
-    }
-    this.sectionFilterChipEl.removeClass("is-hidden");
-    this.sectionFilterChipEl.setText(label);
-    this.sectionFilterChipEl.setAttr("aria-label", `Clear section filter: ${label}`);
-    this.sectionFilterChipEl.setAttr("title", `Clear section filter: ${label}`);
-  }
-  updateArchiveButton() {
-    if (!this.archiveButtonEl) {
-      return;
-    }
-    const hasPendingRefresh = this.plugin.hasPendingManualRefresh();
-    this.archiveButtonEl.toggleClass("is-active", hasPendingRefresh);
-    this.archiveButtonEl.setAttr("aria-pressed", hasPendingRefresh ? "true" : "false");
-  }
-  updateConnectionsButton() {
-    if (!this.connectionsButtonEl) {
-      return;
-    }
-    const showConnections = this.plugin.getShowConnections();
-    this.connectionsButtonEl.toggleClass("is-active", showConnections);
-    this.connectionsButtonEl.setAttr("aria-pressed", showConnections ? "true" : "false");
-  }
-  showSectionFilterMenu(event) {
-    event.preventDefault();
-    event.stopPropagation();
-    const menu = new import_obsidian.Menu();
-    const activeFilter = this.plugin.getSectionFilter();
-    const availableFilters = this.plugin.getAvailableSectionFilters(this.plugin.getFilter());
-    menu.addItem((item) => {
-      item.setTitle("All sections").setIcon("list").setChecked(activeFilter === null).onClick(() => {
-        void this.plugin.setSectionFilter(null);
-      });
-    });
-    if (availableFilters.hasNoSection || (activeFilter == null ? void 0 : activeFilter.kind) === "none") {
-      menu.addItem((item) => {
-        item.setTitle("No section").setChecked((activeFilter == null ? void 0 : activeFilter.kind) === "none").onClick(() => {
-          void this.plugin.setSectionFilter({ kind: "none" });
-        });
-      });
-    }
-    const sectionHeadings = new Set(availableFilters.headings);
-    if ((activeFilter == null ? void 0 : activeFilter.kind) === "heading") {
-      sectionHeadings.add(activeFilter.heading);
-    }
-    const sortedHeadings = Array.from(sectionHeadings).sort(
-      (left, right) => left.localeCompare(right)
-    );
-    if (sortedHeadings.length > 0) {
-      menu.addSeparator();
-      for (const heading of sortedHeadings) {
-        menu.addItem((item) => {
-          item.setTitle(heading).setChecked((activeFilter == null ? void 0 : activeFilter.kind) === "heading" && activeFilter.heading === heading).onClick(() => {
-            void this.plugin.setSectionFilter({ kind: "heading", heading });
-          });
-        });
-      }
-    } else if (!availableFilters.hasNoSection && activeFilter === null) {
-      menu.addSeparator();
-      menu.addItem((item) => {
-        item.setTitle("No sections available").setDisabled(true);
-      });
-    }
-    menu.showAtMouseEvent(event);
-  }
-  captureScrollState() {
-    const scrollTop = this.contentEl.scrollTop;
-    const anchorEls = Array.from(
-      this.contentEl.querySelectorAll(
-        "[data-scroll-anchor-kind][data-scroll-anchor-key]"
-      )
-    );
-    if (anchorEls.length === 0) {
-      return {
-        fallbackAnchor: null,
-        primaryAnchor: null,
-        scrollTop
-      };
-    }
-    const viewportTop = this.contentEl.getBoundingClientRect().top;
-    let primaryIndex = anchorEls.findIndex(
-      (anchorEl) => anchorEl.getBoundingClientRect().bottom > viewportTop
-    );
-    if (primaryIndex === -1) {
-      primaryIndex = anchorEls.length - 1;
-    }
-    return {
-      fallbackAnchor: primaryIndex > 0 ? this.buildScrollAnchor(anchorEls[primaryIndex - 1], viewportTop) : null,
-      primaryAnchor: this.buildScrollAnchor(anchorEls[primaryIndex], viewportTop),
-      scrollTop
-    };
-  }
-  buildScrollAnchor(anchorEl, viewportTop) {
-    const type = anchorEl.getAttribute("data-scroll-anchor-kind");
-    const key = anchorEl.getAttribute("data-scroll-anchor-key");
-    if (!key || type !== "group" && type !== "section" && type !== "task") {
-      return null;
-    }
-    return {
-      key,
-      offset: anchorEl.getBoundingClientRect().top - viewportTop,
-      type
-    };
-  }
-  restoreScrollState(scrollState) {
-    const anchor = scrollState.primaryAnchor && this.findScrollAnchorElement(scrollState.primaryAnchor) ? scrollState.primaryAnchor : scrollState.fallbackAnchor && this.findScrollAnchorElement(scrollState.fallbackAnchor) ? scrollState.fallbackAnchor : null;
-    if (!anchor) {
-      this.contentEl.scrollTop = this.clampScrollTop(scrollState.scrollTop);
-      return;
-    }
-    const anchorEl = this.findScrollAnchorElement(anchor);
-    if (!anchorEl) {
-      this.contentEl.scrollTop = this.clampScrollTop(scrollState.scrollTop);
-      return;
-    }
-    const viewportTop = this.contentEl.getBoundingClientRect().top;
-    const currentOffset = anchorEl.getBoundingClientRect().top - viewportTop;
-    this.contentEl.scrollTop = this.clampScrollTop(
-      this.contentEl.scrollTop + currentOffset - anchor.offset
-    );
-  }
-  findScrollAnchorElement(anchor) {
-    var _a;
-    return (_a = Array.from(
-      this.contentEl.querySelectorAll(
-        "[data-scroll-anchor-kind][data-scroll-anchor-key]"
-      )
-    ).find(
-      (anchorEl) => anchorEl.getAttribute("data-scroll-anchor-kind") === anchor.type && anchorEl.getAttribute("data-scroll-anchor-key") === anchor.key
-    )) != null ? _a : null;
-  }
-  clampScrollTop(scrollTop) {
-    const maxScrollTop = Math.max(0, this.contentEl.scrollHeight - this.contentEl.clientHeight);
-    return Math.max(0, Math.min(maxScrollTop, scrollTop));
-  }
-  getSectionAnchorKey(section) {
-    return `${section.file.path}:${section.line}`;
-  }
-  addJumpButton(checkboxEl, task) {
-    const listItemEl = checkboxEl.closest("li");
-    if (!listItemEl) {
-      return;
-    }
-    const jumpButtonEl = createEl("span", {
-      cls: "vault-tasks-view__task-jump",
-      text: "\u2197",
-      attr: {
-        "aria-label": `Open task source in ${task.file.basename}`,
-        "data-tooltip-position": "bottom",
-        role: "button",
-        tabindex: "0",
-        title: `Open ${task.file.basename} at line ${task.line + 1}`
-      }
-    });
-    this.registerDomEvent(jumpButtonEl, "click", (event) => {
-      event.preventDefault();
-      event.stopPropagation();
-      void this.plugin.openTask(task);
-    });
-    this.registerDomEvent(jumpButtonEl, "keydown", (event) => {
-      if (event.key !== "Enter" && event.key !== " ") {
-        return;
-      }
-      event.preventDefault();
-      event.stopPropagation();
-      void this.plugin.openTask(task);
-    });
-    listItemEl.appendChild(jumpButtonEl);
-  }
-  applyTaskStatusToElement(listItemEl, task) {
-    const checkboxEl = listItemEl.querySelector("input[type='checkbox']");
-    if (!checkboxEl) {
-      return;
-    }
-    checkboxEl.checked = isCheckboxCheckedStatus(task.statusSymbol);
-    listItemEl.toggleClass("is-checked", checkboxEl.checked);
-    if (task.statusSymbol === TASK_STATUS_TODO) {
-      listItemEl.removeAttribute("data-task");
-      return;
-    }
-    listItemEl.setAttr("data-task", task.statusSymbol);
-  }
-  showTaskMenu(event, listItemEl, task) {
-    const menu = new import_obsidian.Menu();
-    menu.addItem((item) => {
-      item.setTitle("Open source").setIcon("file-text").onClick(() => {
-        void this.plugin.openTask(task);
-      });
-    });
-    menu.addItem((item) => {
-      item.setTitle("Copy text").setIcon("copy").onClick(() => {
-        void this.plugin.copyToClipboard(task.text, "Copied task text.");
-      });
-    });
-    menu.addItem((item) => {
-      item.setTitle("Copy task line").setIcon("copy").onClick(() => {
-        void this.plugin.copyToClipboard(task.rawLine.trim(), "Copied task line.");
-      });
-    });
-    menu.addItem((item) => {
-      item.setTitle("Copy note path").setIcon("copy").onClick(() => {
-        void this.plugin.copyToClipboard(task.file.path, "Copied note path.");
-      });
-    });
-    menu.addSeparator();
-    const statusActions = this.plugin.getSettings().statusMode === "standard" ? [
-      { title: "Todo", icon: "circle", symbol: TASK_STATUS_TODO },
-      { title: "Done", icon: "check", symbol: TASK_STATUS_DONE }
-    ] : [
-      { title: "Todo", icon: "circle", symbol: TASK_STATUS_TODO },
-      { title: "In progress", icon: "loader", symbol: TASK_STATUS_IN_PROGRESS },
-      { title: "Done", icon: "check", symbol: TASK_STATUS_DONE },
-      { title: "Cancelled", icon: "minus", symbol: TASK_STATUS_CANCELLED },
-      { title: "Deferred", icon: "fast-forward", symbol: TASK_STATUS_DEFERRED }
-    ];
-    for (const statusAction of statusActions) {
-      menu.addItem((item) => {
-        const disableCancelled = statusAction.symbol === TASK_STATUS_CANCELLED && isCheckboxCheckedStatus(task.statusSymbol) && task.statusSymbol !== TASK_STATUS_CANCELLED;
-        item.setTitle(statusAction.title).setIcon(statusAction.icon).setChecked(task.statusSymbol === statusAction.symbol).setDisabled(disableCancelled).onClick(() => {
-          void (async () => {
-            const didUpdate = await this.plugin.setTaskStatus(task, statusAction.symbol);
-            if (!didUpdate) {
-              return;
-            }
-            this.applyTaskStatusToElement(listItemEl, task);
-          })();
-        });
-      });
-    }
-    menu.showAtMouseEvent(event);
-  }
-  bindHeadingMenu(headingEl, group) {
-    const titleLinkEl = headingEl.querySelector("a.internal-link");
-    if (!titleLinkEl) {
-      return;
-    }
-    this.registerDomEvent(titleLinkEl, "contextmenu", (event) => {
-      event.preventDefault();
-      event.stopPropagation();
-      const menu = new import_obsidian.Menu();
-      menu.addItem((item) => {
-        item.setTitle("Open").setIcon("file-text").onClick(() => {
-          void this.plugin.openNote(group.file);
-        });
-      });
-      menu.addItem((item) => {
-        item.setTitle("Copy name").setIcon("copy").onClick(() => {
-          void this.plugin.copyToClipboard(group.noteTitle, "Copied note name.");
-        });
-      });
-      menu.addItem((item) => {
-        item.setTitle("Copy path").setIcon("copy").onClick(() => {
-          void this.plugin.copyToClipboard(group.file.path, "Copied note path.");
-        });
-      });
-      menu.addItem((item) => {
-        item.setTitle("Copy wiki link").setIcon("link").onClick(() => {
-          const linkText = this.app.metadataCache.fileToLinktext(group.file, "/", true);
-          void this.plugin.copyToClipboard(`[[${linkText}]]`, "Copied wiki link.");
-        });
-      });
-      menu.addSeparator();
-      menu.addItem((item) => {
-        item.setTitle("Complete all").setIcon("check").onClick(() => {
-          void this.plugin.setTasksStatus(group.tasks, TASK_STATUS_DONE);
-        });
-      });
-      if (this.plugin.getSettings().statusMode === "extended") {
-        menu.addItem((item) => {
-          item.setTitle("Cancel pending").setIcon("minus").onClick(() => {
-            void this.plugin.setTasksStatus(group.tasks, TASK_STATUS_CANCELLED, {
-              onlyUnchecked: true
-            });
-          });
-        });
-      }
-      menu.addSeparator();
-      menu.addItem((item) => {
-        item.setTitle("Defer until").setIcon("calendar-days").onClick(() => {
-          new DeferUntilModal(
-            this.app,
-            group.noteTitle,
-            group.deferredUntil,
-            async (deferredUntil) => {
-              await this.plugin.setDeferredUntil(group.file, deferredUntil);
-            }
-          ).open();
-        });
-      });
-      menu.addSeparator();
-      menu.addItem((item) => {
-        item.setTitle("Hide").setIcon("eye-off").onClick(() => {
-          void this.plugin.hideFromTaskList(group.file);
-        });
-      });
-      menu.showAtMouseEvent(event);
-    });
-  }
-  bindSectionMenu(headingEl, section) {
-    this.registerDomEvent(headingEl, "contextmenu", (event) => {
-      event.preventDefault();
-      event.stopPropagation();
-      const activeSectionFilter = this.plugin.getSectionFilter();
-      const menu = new import_obsidian.Menu();
-      menu.addItem((item) => {
-        item.setTitle("Show only this section").setIcon("filter").setChecked(
-          (activeSectionFilter == null ? void 0 : activeSectionFilter.kind) === "heading" && activeSectionFilter.heading === section.heading
-        ).onClick(() => {
-          void this.plugin.setSectionFilter({
-            kind: "heading",
-            heading: section.heading
-          });
-        });
-      });
-      menu.addSeparator();
-      menu.addItem((item) => {
-        item.setTitle("Complete all").setIcon("check").onClick(() => {
-          void this.plugin.setTasksStatus(section.tasks, TASK_STATUS_DONE);
-        });
-      });
-      if (this.plugin.getSettings().statusMode === "extended") {
-        menu.addItem((item) => {
-          item.setTitle("Cancel pending").setIcon("minus").onClick(() => {
-            void this.plugin.setTasksStatus(section.tasks, TASK_STATUS_CANCELLED, {
-              onlyUnchecked: true
-            });
-          });
-        });
-      }
-      menu.showAtMouseEvent(event);
-    });
-  }
-  decorateHeadingContext(headingEl) {
-    var _a, _b, _c;
-    const headingBlockEl = (_a = headingEl.closest(".el-h2")) != null ? _a : headingEl;
-    let nextBlockEl = headingBlockEl.nextElementSibling;
-    while (nextBlockEl) {
-      const paragraphEl = nextBlockEl instanceof HTMLParagraphElement ? nextBlockEl : nextBlockEl.querySelector(":scope > p");
-      if (!(paragraphEl instanceof HTMLParagraphElement)) {
-        return;
-      }
-      const text = (_c = (_b = paragraphEl.textContent) == null ? void 0 : _b.trim()) != null ? _c : "";
-      if (text.startsWith("Deferred until:")) {
-        paragraphEl.addClass("vault-tasks-view__deferred");
-        nextBlockEl = nextBlockEl.nextElementSibling;
-        continue;
-      }
-      if (text.startsWith("Related to:")) {
-        paragraphEl.addClass("vault-tasks-view__connections");
-        const linkEls = Array.from(
-          paragraphEl.querySelectorAll("a.internal-link")
-        );
-        for (const linkEl of linkEls) {
-          linkEl.addClass("vault-tasks-view__connections-link");
-        }
-        nextBlockEl = nextBlockEl.nextElementSibling;
-        continue;
-      }
-      return;
-    }
-  }
-};
-var VaultTasksSettingTab = class extends import_obsidian.PluginSettingTab {
-  constructor(app, plugin) {
-    super(app, plugin);
-    this.plugin = plugin;
-  }
-  display() {
-    const { containerEl } = this;
-    const settings = this.plugin.getSettings();
-    containerEl.empty();
-    new import_obsidian.Setting(containerEl).setName("View defaults").setHeading();
-    new import_obsidian.Setting(containerEl).setName("Open location").setDesc("Choose where the task view opens when a new leaf is created.").addDropdown((component) => {
-      component.addOption("main", "Main tab").addOption("sidebar", "Right sidebar").setValue(settings.openLocation).onChange(async (value) => {
-        await this.plugin.updateSettings({
-          openLocation: normalizeTaskViewLocation(value)
-        });
-      });
-    });
-    new import_obsidian.Setting(containerEl).setName("Default filter").setDesc("Choose which task filter the view starts with.").addDropdown((component) => {
-      component.addOption("pending", "Pending").addOption("all", "All").addOption("completed", "Completed").setValue(settings.defaultFilter).onChange(async (value) => {
-        const defaultFilter = normalizeTaskFilter(value);
-        await this.plugin.updateSettings({ defaultFilter });
-        await this.plugin.setFilter(defaultFilter);
-      });
-    });
-    new import_obsidian.Setting(containerEl).setName("Show related notes by default").setDesc("Show backlink context under note titles when the view opens.").addToggle((component) => {
-      component.setValue(settings.showConnectionsByDefault).onChange(async (value) => {
-        await this.plugin.updateSettings({
-          showConnectionsByDefault: value
-        });
-        await this.plugin.setShowConnections(value);
-      });
-    });
-    new import_obsidian.Setting(containerEl).setName("Show section headings").setDesc("Render source headings inside each note group.").addToggle((component) => {
-      component.setValue(settings.showSectionHeadings).onChange(async (value) => {
-        await this.plugin.updateSettings({
-          showSectionHeadings: value
-        });
-        await this.plugin.rerenderViews();
-      });
-    });
-    new import_obsidian.Setting(containerEl).setName("Remember section filter").setDesc("Restore the last selected section filter when Obsidian restarts.").addToggle((component) => {
-      component.setValue(settings.persistSectionFilter).onChange(async (value) => {
-        await this.plugin.updateSettings({
-          persistSectionFilter: value,
-          savedSectionFilter: value ? this.plugin.getSectionFilter() : null
-        });
-      });
-    });
-    new import_obsidian.Setting(containerEl).setName("Tasks").setHeading();
-    new import_obsidian.Setting(containerEl).setName("Task status actions").setDesc("Choose whether task menus use only standard Markdown states or extended states.").addDropdown((component) => {
-      component.addOption("standard", "Standard Markdown").addOption("extended", "Extended statuses").setValue(settings.statusMode).onChange(async (value) => {
-        await this.plugin.updateSettings({
-          statusMode: normalizeTaskStatusMode(value)
-        });
-        await this.plugin.rerenderViews();
-      });
-    });
-    new import_obsidian.Setting(containerEl).setName("Pending filter").setDesc("Choose whether in-progress tasks appear in the pending view.").addDropdown((component) => {
-      component.addOption("todo-only", "[ ] only").addOption("todo-and-in-progress", "[ ] and [/]").setValue(settings.pendingMode).onChange(async (value) => {
-        await this.plugin.updateSettings({
-          pendingMode: normalizePendingMode(value)
-        });
-        await this.plugin.rerenderViews();
-      });
-    });
-    new import_obsidian.Setting(containerEl).setName("Include cancelled in completed").setDesc("Show cancelled tasks in the completed view.").addToggle((component) => {
-      component.setValue(settings.includeCancelledInCompleted).onChange(async (value) => {
-        await this.plugin.updateSettings({
-          includeCancelledInCompleted: value
-        });
-        await this.plugin.rerenderViews();
-      });
-    });
-    new import_obsidian.Setting(containerEl).setName("Scope").setHeading();
-    new import_obsidian.Setting(containerEl).setName("Include folders").setDesc("One folder per line. Leave empty to include the whole vault.").addTextArea((component) => {
-      component.setValue(formatFolderList(settings.includeFolders));
-      component.inputEl.rows = 4;
-      component.inputEl.addEventListener("change", () => {
-        void (async () => {
-          await this.plugin.updateSettings({
-            includeFolders: parseFolderListInput(component.inputEl.value)
-          });
-          await this.plugin.rebuildIndex();
-        })();
-      });
-    });
-    new import_obsidian.Setting(containerEl).setName("Exclude folders").setDesc("One folder per line. Excluded folders always win.").addTextArea((component) => {
-      component.setValue(formatFolderList(settings.excludeFolders));
-      component.inputEl.rows = 4;
-      component.inputEl.addEventListener("change", () => {
-        void (async () => {
-          await this.plugin.updateSettings({
-            excludeFolders: parseFolderListInput(component.inputEl.value)
-          });
-          await this.plugin.rebuildIndex();
-        })();
-      });
-    });
-    new import_obsidian.Setting(containerEl).setName("Sorting").setHeading();
-    new import_obsidian.Setting(containerEl).setName("Sort notes by").setDesc("Choose how note groups are ordered in the task view.").addDropdown((component) => {
-      for (const [value, label] of Object.entries(NOTE_SORT_LABELS)) {
-        component.addOption(value, label);
-      }
-      component.setValue(settings.noteSort).onChange(async (value) => {
-        await this.plugin.updateSettings({
-          noteSort: normalizeNoteSortMode(value)
-        });
-        await this.plugin.rerenderViews();
-      });
-    });
-    new import_obsidian.Setting(containerEl).setName("Sort sections by").setDesc("Choose how section groups are ordered inside each note.").addDropdown((component) => {
-      for (const [value, label] of Object.entries(SECTION_SORT_LABELS)) {
-        component.addOption(value, label);
-      }
-      component.setValue(settings.sectionSort).onChange(async (value) => {
-        await this.plugin.updateSettings({
-          sectionSort: normalizeSectionSortMode(value)
-        });
-        await this.plugin.rerenderViews();
-      });
-    });
-    new import_obsidian.Setting(containerEl).setName("Sort tasks by").setDesc("Choose how tasks are ordered within each section.").addDropdown((component) => {
-      for (const [value, label] of Object.entries(TASK_SORT_LABELS)) {
-        component.addOption(value, label);
-      }
-      component.setValue(settings.taskSort).onChange(async (value) => {
-        await this.plugin.updateSettings({
-          taskSort: normalizeTaskSortMode(value)
-        });
-        await this.plugin.rerenderViews();
-      });
-    });
-  }
-};
-var DeferUntilModal = class extends import_obsidian.Modal {
-  constructor(app, noteTitle, currentDeferredUntil, onSubmitDate) {
-    super(app);
-    this.noteTitle = noteTitle;
-    this.currentDeferredUntil = currentDeferredUntil;
-    this.onSubmitDate = onSubmitDate;
-    this.dateInputEl = null;
-    this.minimumDate = getTomorrowDateString();
-  }
-  onOpen() {
-    var _a;
-    this.setTitle("Defer until");
-    new import_obsidian.Setting(this.contentEl).setName(this.noteTitle).setDesc("Pending tasks from this note stay hidden until this date.").addText((component) => {
-      component.inputEl.type = "date";
-      component.inputEl.min = this.minimumDate;
-      component.setValue(this.getInitialDateValue());
-      this.dateInputEl = component.inputEl;
-      component.inputEl.addEventListener("keydown", (event) => {
-        if (event.key !== "Enter") {
-          return;
-        }
-        event.preventDefault();
-        void this.submit();
-      });
-    });
-    new import_obsidian.Setting(this.contentEl).addButton((button) => {
-      button.setButtonText("Cancel").onClick(() => {
-        this.close();
-      });
-    }).addButton((button) => {
-      button.setButtonText("Save").setCta().onClick(() => {
-        void this.submit();
-      });
-    });
-    (_a = this.dateInputEl) == null ? void 0 : _a.focus();
-    window.setTimeout(() => {
-      var _a2;
-      const dateInputEl = this.dateInputEl;
-      try {
-        (_a2 = dateInputEl == null ? void 0 : dateInputEl.showPicker) == null ? void 0 : _a2.call(dateInputEl);
-      } catch (e) {
-      }
-    }, 0);
-  }
-  getInitialDateValue() {
-    if (this.currentDeferredUntil && this.currentDeferredUntil >= this.minimumDate) {
-      return this.currentDeferredUntil;
-    }
-    return this.minimumDate;
-  }
-  async submit() {
-    var _a, _b;
-    const deferredUntil = (_b = (_a = this.dateInputEl) == null ? void 0 : _a.value) != null ? _b : "";
-    if (!isFutureDate(deferredUntil)) {
-      new import_obsidian.Notice("Choose a future date.");
-      return;
-    }
-    await this.onSubmitDate(deferredUntil);
-    this.close();
-  }
-};
-function buildRenderedDocument(snapshot, metadataCache, getBacklinkFiles) {
-  var _a;
-  const sections = [];
-  const renderedGroups = [];
-  const renderedSections = [];
-  const renderedTasks = [];
-  const today = getTodayDateString();
-  const visibleGroups = getVisibleTaskGroups(snapshot, today);
-  sortVisibleTaskGroups(visibleGroups, snapshot.settings.noteSort);
-  for (const visibleGroup of visibleGroups) {
-    const { group, tasks } = visibleGroup;
-    const linkText = escapeWikiLinkText(metadataCache.fileToLinktext(group.file, "/", true));
-    const noteTitle = escapeWikiLinkText(group.noteTitle);
-    sections.push(`## [[${linkText}|${noteTitle}]]`);
-    renderedGroups.push(group);
-    if (snapshot.filter === "all" && group.deferredUntil) {
-      sections.push(buildDeferredUntilLine(group.deferredUntil));
-    }
-    if (snapshot.showConnections) {
-      const backlinks = getBacklinkFiles(group.file);
-      if (backlinks.length > 0) {
-        sections.push(buildConnectionsLine(backlinks, metadataCache));
-      }
-    }
-    const sectionBuckets = buildRenderSectionBuckets(tasks);
-    sortRenderSectionBuckets(sectionBuckets, snapshot.settings.sectionSort);
-    for (const sectionBucket of sectionBuckets) {
-      sortTasks(sectionBucket.tasks, snapshot.settings.taskSort);
-      let renderedSection = null;
-      if (snapshot.settings.showSectionHeadings && sectionBucket.heading !== null) {
-        sections.push(`### ${sectionBucket.heading}`);
-        renderedSection = {
-          file: group.file,
-          heading: sectionBucket.heading,
-          line: sectionBucket.line,
-          tasks: []
-        };
-        renderedSections.push(renderedSection);
-      }
-      for (const task of sectionBucket.tasks) {
-        sections.push(task.renderedLine);
-        renderedSection == null ? void 0 : renderedSection.tasks.push(task);
-        renderedTasks.push(task);
-      }
-    }
-    sections.push("");
-  }
-  if (sections.length === 0) {
-    const emptyMessage = (_a = snapshot.error) != null ? _a : buildEmptyStateMessage(snapshot.filter, snapshot.sectionFilter);
-    return {
-      markdown: emptyMessage,
-      renderedGroups,
-      renderedSections,
-      renderedTasks
-    };
-  }
-  return {
-    markdown: sections.join("\n").trim(),
-    renderedGroups,
-    renderedSections,
-    renderedTasks
-  };
-}
-function buildDeferredUntilLine(deferredUntil) {
-  return `<span class="vault-tasks-view__deferred-label">Deferred until:</span> ${deferredUntil}`;
-}
-function buildConnectionsLine(backlinks, metadataCache) {
-  const renderedLinks = backlinks.map((backlinkFile) => {
-    const linkText = escapeWikiLinkText(metadataCache.fileToLinktext(backlinkFile, "/", true));
-    return `[[${linkText}]]`;
-  });
-  return `<span class="vault-tasks-view__connections-label">Related to:</span> ${renderedLinks.join(", ")}`;
-}
-function getVisibleTaskGroups(snapshot, today) {
-  const visibleGroups = [];
-  for (const group of snapshot.groups) {
-    if (snapshot.filter === "pending" && isDeferred(group.deferredUntil, today)) {
-      continue;
-    }
-    const visibleTasks = group.tasks.filter(
-      (task) => matchesFilter(task, snapshot.filter, snapshot.settings) && matchesSectionFilter(task, snapshot.sectionFilter)
-    );
-    if (visibleTasks.length === 0) {
-      continue;
-    }
-    visibleGroups.push({
-      group,
-      tasks: [...visibleTasks]
-    });
-  }
-  return visibleGroups;
-}
-function buildRenderSectionBuckets(tasks) {
-  var _a;
-  const buckets = [];
-  let currentBucket = null;
-  let currentBucketKey = null;
-  for (const task of tasks) {
-    const bucketKey = task.sectionHeading !== null && task.sectionLine !== null ? `${task.sectionLine}:${task.sectionHeading}` : "__none__";
-    if (bucketKey !== currentBucketKey) {
-      currentBucketKey = bucketKey;
-      currentBucket = {
-        heading: task.sectionHeading,
-        line: (_a = task.sectionLine) != null ? _a : task.line,
-        tasks: []
-      };
-      buckets.push(currentBucket);
-    }
-    if (!currentBucket) {
-      continue;
-    }
-    currentBucket.tasks.push(task);
-  }
-  return buckets;
-}
-function buildTaskItem(file, taskItem, lines, headings) {
-  var _a, _b;
-  const line = taskItem.position.start.line;
-  const rawLine = lines[line];
-  if (rawLine === void 0) {
-    return null;
-  }
-  const text = extractTaskText(rawLine);
-  if (text === null) {
-    return null;
-  }
-  const section = findTaskSection(line, headings);
-  const statusSymbol = normalizeTaskStatusSymbol(taskItem.task);
-  return {
-    completed: isCheckboxCheckedStatus(statusSymbol),
-    file,
-    key: `${file.path}:${line}`,
-    line,
-    rawLine,
-    renderedLine: rawLine.trimStart(),
-    sectionHeading: (_a = section == null ? void 0 : section.heading) != null ? _a : null,
-    sectionLine: (_b = section == null ? void 0 : section.position.start.line) != null ? _b : null,
-    statusSymbol,
-    text
-  };
-}
-function collectEditorLines(editor) {
-  const lines = [];
-  for (let index = 0; index < editor.lineCount(); index += 1) {
-    lines.push(editor.getLine(index));
-  }
-  return lines;
-}
-function escapeWikiLinkText(text) {
-  return text.replace(/([\\[\]|])/g, "\\$1");
-}
-function extractTaskText(rawLine) {
-  const match = rawLine.match(TASK_TEXT_PATTERN);
-  return match ? match[1] : null;
-}
-function extractDeferredUntil(content) {
-  var _a;
-  return normalizeDeferredUntil(
-    (_a = extractFrontmatterValue(content, DEFERRED_UNTIL_KEY)) != null ? _a : extractFrontmatterValue(content, LEGACY_DEFERRED_UNTIL_KEY)
-  );
-}
-function extractHiddenFromTaskList(content) {
-  var _a;
-  return (_a = normalizeFrontmatterBoolean(extractFrontmatterValue(content, HIDDEN_FROM_TASKS_KEY))) != null ? _a : false;
-}
-function filterLabel(filter) {
-  switch (filter) {
-    case "pending":
-      return "Pending";
-    case "completed":
-      return "Completed";
-    default:
-      return "All";
-  }
-}
-function filterIcon(filter) {
-  switch (filter) {
-    case "pending":
-      return "circle";
-    case "completed":
-      return "check";
-    default:
-      return "list";
-  }
-}
-function filterDescription(filter) {
-  switch (filter) {
-    case "pending":
-      return "pending";
-    case "completed":
-      return "completed";
-    default:
-      return "all";
-  }
-}
-function getSectionFilterLabel(sectionFilter) {
-  if (!sectionFilter) {
-    return null;
-  }
-  if (sectionFilter.kind === "none") {
-    return "No section";
-  }
-  return sectionFilter.heading;
-}
-function buildEmptyStateMessage(filter, sectionFilter) {
-  const baseMessage = filter === "all" ? "No tasks." : `No ${filterDescription(filter)} tasks.`;
-  const sectionLabel = getSectionFilterLabel(sectionFilter);
-  if (!sectionLabel) {
-    return baseMessage;
-  }
-  if ((sectionFilter == null ? void 0 : sectionFilter.kind) === "none") {
-    return `${baseMessage.slice(0, -1)} without a section.`;
-  }
-  return `${baseMessage.slice(0, -1)} in ${sectionLabel}.`;
-}
-function getTodayDateString() {
-  return formatDate(/* @__PURE__ */ new Date());
-}
-function getTomorrowDateString() {
-  const tomorrow = /* @__PURE__ */ new Date();
-  tomorrow.setDate(tomorrow.getDate() + 1);
-  return formatDate(tomorrow);
-}
-function isDeferred(deferredUntil, today) {
-  return deferredUntil !== null && deferredUntil > today;
-}
-function isFutureDate(date) {
-  return DATE_PATTERN.test(date) && date >= getTomorrowDateString();
-}
-function isHiddenFromTaskListFrontmatter(frontmatter) {
-  var _a;
-  if (!frontmatter) {
-    return false;
-  }
-  return (_a = normalizeFrontmatterBoolean(frontmatter[HIDDEN_FROM_TASKS_KEY])) != null ? _a : false;
-}
-function findTaskLine(lines, task) {
-  const currentLine = lines[task.line];
-  if (currentLine !== void 0) {
-    const sameLine = currentLine === task.rawLine || extractTaskText(currentLine) === task.text;
-    if (sameLine) {
-      return task.line;
-    }
-  }
-  const rawLineMatches = lines.map((line, index) => ({ index, line })).filter(({ line }) => line === task.rawLine);
-  if (rawLineMatches.length === 1) {
-    return rawLineMatches[0].index;
-  }
-  const textMatches = lines.map((line, index) => ({ index, text: extractTaskText(line) })).filter(({ text }) => text === task.text);
-  if (textMatches.length === 1) {
-    return textMatches[0].index;
-  }
-  return null;
-}
-function getTaskListItems(cache) {
-  if (!(cache == null ? void 0 : cache.listItems)) {
-    return [];
-  }
-  return cache.listItems.filter((item) => item.task !== void 0);
-}
-function getHeadingCaches(cache) {
-  if (!(cache == null ? void 0 : cache.headings)) {
-    return [];
-  }
-  return [...cache.headings].sort(
-    (left, right) => left.position.start.line - right.position.start.line
-  );
-}
-function matchesFilter(task, filter, settings) {
-  switch (filter) {
-    case "pending":
-      return isPendingTaskStatus(task.statusSymbol, settings);
-    case "completed":
-      return isCompletedTaskStatus(task.statusSymbol, settings);
-    default:
-      return true;
-  }
-}
-function matchesSectionFilter(task, sectionFilter) {
-  if (!sectionFilter) {
-    return true;
-  }
-  if (sectionFilter.kind === "none") {
-    return task.sectionHeading === null;
-  }
-  return task.sectionHeading === sectionFilter.heading;
-}
-function isSameSectionFilter(left, right) {
-  if (left === right) {
-    return true;
-  }
-  if (!left || !right || left.kind !== right.kind) {
-    return false;
-  }
-  if (left.kind === "none") {
-    return true;
-  }
-  if (right.kind === "none") {
-    return false;
-  }
-  return left.heading === right.heading;
-}
-function setTaskCompletion(rawLine, completed) {
-  return setTaskStatusSymbol(rawLine, completed ? TASK_STATUS_DONE : TASK_STATUS_TODO);
-}
-function setTaskStatusSymbol(rawLine, statusSymbol) {
-  const match = rawLine.match(TASK_LINE_PATTERN);
-  if (!match) {
-    return null;
-  }
-  return `${match[1]}${statusSymbol}${match[3]}`;
-}
-function getTaskStatusSymbol(rawLine) {
-  const match = rawLine.match(TASK_LINE_PATTERN);
-  return match ? match[2] : null;
-}
-function findTaskSection(taskLine, headings) {
-  let nearestHeading = null;
-  for (const heading of headings) {
-    if (heading.position.start.line >= taskLine) {
-      break;
-    }
-    nearestHeading = heading;
-  }
-  return nearestHeading;
-}
-function updateAllTasksInEditor(editor, completed) {
-  let updatedCount = 0;
-  for (let index = 0; index < editor.lineCount(); index += 1) {
-    const rawLine = editor.getLine(index);
-    const nextLine = setTaskCompletion(rawLine, completed);
-    if (nextLine === null || nextLine === rawLine) {
-      continue;
-    }
-    editor.setLine(index, nextLine);
-    updatedCount += 1;
-  }
-  return updatedCount;
-}
-function updateSpecificTasksInEditor(editor, tasks, statusSymbol, options) {
-  const lines = collectEditorLines(editor);
-  let updatedCount = 0;
-  for (const task of tasks) {
-    const targetLine = findTaskLine(lines, task);
-    if (targetLine === null) {
-      continue;
-    }
-    const currentLine = lines[targetLine];
-    const currentStatus = getTaskStatusSymbol(currentLine);
-    if (currentStatus === null) {
-      continue;
-    }
-    if ((options == null ? void 0 : options.onlyUnchecked) && currentStatus !== TASK_STATUS_TODO) {
-      continue;
-    }
-    const nextLine = setTaskStatusSymbol(currentLine, statusSymbol);
-    if (nextLine === null || nextLine === currentLine) {
-      continue;
-    }
-    lines[targetLine] = nextLine;
-    editor.setLine(targetLine, nextLine);
-    updatedCount += 1;
-  }
-  return updatedCount;
-}
-function updateTaskStatusInContent(content, task, statusSymbol) {
-  const newline = content.includes("\r\n") ? "\r\n" : "\n";
-  const lines = content.split(/\r?\n/);
-  const targetLine = findTaskLine(lines, task);
-  if (targetLine === null) {
-    throw new Error("The task moved before it could be updated. Refresh and try again.");
-  }
-  const nextLine = setTaskStatusSymbol(lines[targetLine], statusSymbol);
-  if (nextLine === null) {
-    throw new Error("The source line is no longer a standard Markdown task.");
-  }
-  lines[targetLine] = nextLine;
-  return lines.join(newline);
-}
-function updateAllTasksInContent(content, completed) {
-  const newline = content.includes("\r\n") ? "\r\n" : "\n";
-  const lines = content.split(/\r?\n/);
-  let updatedCount = 0;
-  for (let index = 0; index < lines.length; index += 1) {
-    const rawLine = lines[index];
-    const nextLine = setTaskCompletion(rawLine, completed);
-    if (nextLine === null || nextLine === rawLine) {
-      continue;
-    }
-    lines[index] = nextLine;
-    updatedCount += 1;
-  }
-  return {
-    content: lines.join(newline),
-    updatedCount
-  };
-}
-function updateSpecificTasksInContent(content, tasks, statusSymbol, options) {
-  const newline = content.includes("\r\n") ? "\r\n" : "\n";
-  const lines = content.split(/\r?\n/);
-  let updatedCount = 0;
-  for (const task of tasks) {
-    const targetLine = findTaskLine(lines, task);
-    if (targetLine === null) {
-      continue;
-    }
-    const currentLine = lines[targetLine];
-    const currentStatus = getTaskStatusSymbol(currentLine);
-    if (currentStatus === null) {
-      continue;
-    }
-    if ((options == null ? void 0 : options.onlyUnchecked) && currentStatus !== TASK_STATUS_TODO) {
-      continue;
-    }
-    const nextLine = setTaskStatusSymbol(currentLine, statusSymbol);
-    if (nextLine === null || nextLine === currentLine) {
-      continue;
-    }
-    lines[targetLine] = nextLine;
-    updatedCount += 1;
-  }
-  return {
-    content: lines.join(newline),
-    updatedCount
-  };
-}
-function isCheckboxCheckedStatus(statusSymbol) {
-  return statusSymbol !== TASK_STATUS_TODO;
-}
-function isCompletedTaskStatus(statusSymbol, settings) {
-  return statusSymbol === TASK_STATUS_DONE || statusSymbol === "X" || settings.includeCancelledInCompleted && statusSymbol === TASK_STATUS_CANCELLED;
-}
-function isPendingTaskStatus(statusSymbol, settings) {
-  return statusSymbol === TASK_STATUS_TODO || settings.pendingMode === "todo-and-in-progress" && statusSymbol === TASK_STATUS_IN_PROGRESS;
-}
-function normalizeTaskStatusSymbol(statusSymbol) {
-  switch (statusSymbol) {
-    case TASK_STATUS_TODO:
-    case TASK_STATUS_IN_PROGRESS:
-    case TASK_STATUS_DONE:
-    case "X":
-    case TASK_STATUS_CANCELLED:
-    case TASK_STATUS_DEFERRED:
-      return statusSymbol;
-    default:
-      return statusSymbol || TASK_STATUS_TODO;
-  }
-}
-function normalizeSettings(value) {
-  const candidate = isObjectRecord(value) ? value : {};
-  const defaultFilter = normalizeTaskFilter(candidate.defaultFilter);
-  const persistSectionFilter = candidate.persistSectionFilter === true;
-  return {
-    defaultFilter,
-    excludeFolders: normalizeFolderList(candidate.excludeFolders),
-    includeCancelledInCompleted: typeof candidate.includeCancelledInCompleted === "boolean" ? candidate.includeCancelledInCompleted : DEFAULT_SETTINGS.includeCancelledInCompleted,
-    includeFolders: normalizeFolderList(candidate.includeFolders),
-    openLocation: normalizeTaskViewLocation(candidate.openLocation),
-    pendingMode: normalizePendingMode(candidate.pendingMode),
-    persistSectionFilter,
-    savedSectionFilter: persistSectionFilter ? normalizeSectionFilter(candidate.savedSectionFilter) : null,
-    sectionSort: normalizeSectionSortMode(candidate.sectionSort),
-    showConnectionsByDefault: typeof candidate.showConnectionsByDefault === "boolean" ? candidate.showConnectionsByDefault : DEFAULT_SETTINGS.showConnectionsByDefault,
-    showSectionHeadings: typeof candidate.showSectionHeadings === "boolean" ? candidate.showSectionHeadings : DEFAULT_SETTINGS.showSectionHeadings,
-    statusMode: normalizeTaskStatusMode(candidate.statusMode),
-    taskSort: normalizeTaskSortMode(candidate.taskSort),
-    noteSort: normalizeNoteSortMode(candidate.noteSort)
-  };
-}
-function matchesFolderScope(path, settings) {
-  const normalizedPath = (0, import_obsidian.normalizePath)(path);
-  const hasIncludedFolder = settings.includeFolders.length === 0 || settings.includeFolders.some((folder) => isPathInFolder(normalizedPath, folder));
-  if (!hasIncludedFolder) {
-    return false;
-  }
-  return !settings.excludeFolders.some((folder) => isPathInFolder(normalizedPath, folder));
-}
-function isPathInFolder(path, folder) {
-  return path === folder || path.startsWith(`${folder}/`);
-}
-function sortVisibleTaskGroups(visibleGroups, noteSort) {
-  visibleGroups.sort((left, right) => compareVisibleTaskGroups(left, right, noteSort));
-}
-function compareVisibleTaskGroups(left, right, noteSort) {
-  switch (noteSort) {
-    case "title-desc":
-      return compareStrings(right.group.noteTitle, left.group.noteTitle, left.group.file.path, right.group.file.path);
-    case "path-asc":
-      return compareStrings(left.group.file.path, right.group.file.path, left.group.noteTitle, right.group.noteTitle);
-    case "path-desc":
-      return compareStrings(right.group.file.path, left.group.file.path, left.group.noteTitle, right.group.noteTitle);
-    case "task-count-desc":
-      return right.tasks.length - left.tasks.length || compareStrings(left.group.noteTitle, right.group.noteTitle, left.group.file.path, right.group.file.path);
-    case "task-count-asc":
-      return left.tasks.length - right.tasks.length || compareStrings(left.group.noteTitle, right.group.noteTitle, left.group.file.path, right.group.file.path);
-    case "title-asc":
-    default:
-      return compareStrings(left.group.noteTitle, right.group.noteTitle, left.group.file.path, right.group.file.path);
-  }
-}
-function sortRenderSectionBuckets(sectionBuckets, sectionSort) {
-  sectionBuckets.sort((left, right) => {
-    if (left.heading === null && right.heading === null) {
-      return left.line - right.line;
-    }
-    if (left.heading === null) {
-      return -1;
-    }
-    if (right.heading === null) {
-      return 1;
-    }
-    switch (sectionSort) {
-      case "heading-asc":
-        return compareStrings(left.heading, right.heading, String(left.line), String(right.line));
-      case "heading-desc":
-        return compareStrings(right.heading, left.heading, String(left.line), String(right.line));
-      case "source":
-      default:
-        return left.line - right.line || left.heading.localeCompare(right.heading);
-    }
-  });
-}
-function sortTasks(tasks, taskSort) {
-  tasks.sort((left, right) => compareTasks(left, right, taskSort));
-}
-function compareTasks(left, right, taskSort) {
-  switch (taskSort) {
-    case "text-asc":
-      return compareStrings(left.text, right.text, String(left.line), String(right.line));
-    case "text-desc":
-      return compareStrings(right.text, left.text, String(left.line), String(right.line));
-    case "status-source":
-      return getTaskStatusSortRank(left.statusSymbol) - getTaskStatusSortRank(right.statusSymbol) || left.line - right.line || left.text.localeCompare(right.text);
-    case "source":
-    default:
-      return left.line - right.line || left.text.localeCompare(right.text);
-  }
-}
-function getTaskStatusSortRank(statusSymbol) {
-  switch (statusSymbol) {
-    case TASK_STATUS_TODO:
-      return 0;
-    case TASK_STATUS_IN_PROGRESS:
-      return 1;
-    case TASK_STATUS_DEFERRED:
-      return 2;
-    case TASK_STATUS_DONE:
-    case "X":
-      return 3;
-    case TASK_STATUS_CANCELLED:
-      return 4;
-    default:
-      return 5;
-  }
-}
-function compareStrings(left, right, leftFallback, rightFallback) {
-  return left.localeCompare(right) || leftFallback.localeCompare(rightFallback);
-}
-function normalizeTaskFilter(value) {
-  return value === "all" || value === "completed" || value === "pending" ? value : DEFAULT_SETTINGS.defaultFilter;
-}
-function normalizeTaskViewLocation(value) {
-  return value === "sidebar" || value === "main" ? value : DEFAULT_SETTINGS.openLocation;
-}
-function normalizeTaskStatusMode(value) {
-  return value === "standard" || value === "extended" ? value : DEFAULT_SETTINGS.statusMode;
-}
-function normalizePendingMode(value) {
-  return value === "todo-only" || value === "todo-and-in-progress" ? value : DEFAULT_SETTINGS.pendingMode;
-}
-function normalizeNoteSortMode(value) {
-  switch (value) {
-    case "title-asc":
-    case "title-desc":
-    case "path-asc":
-    case "path-desc":
-    case "task-count-desc":
-    case "task-count-asc":
-      return value;
-    default:
-      return DEFAULT_SETTINGS.noteSort;
-  }
-}
-function normalizeSectionSortMode(value) {
-  return value === "source" || value === "heading-asc" || value === "heading-desc" ? value : DEFAULT_SETTINGS.sectionSort;
-}
-function normalizeTaskSortMode(value) {
-  return value === "source" || value === "text-asc" || value === "text-desc" || value === "status-source" ? value : DEFAULT_SETTINGS.taskSort;
-}
-function normalizeSectionFilter(value) {
-  if (!isObjectRecord(value) || typeof value.kind !== "string") {
-    return null;
-  }
-  if (value.kind === "none") {
-    return { kind: "none" };
-  }
-  if (value.kind === "heading" && typeof value.heading === "string" && value.heading.trim().length > 0) {
-    return {
-      kind: "heading",
-      heading: value.heading.trim()
-    };
-  }
-  return null;
-}
-function normalizeFolderList(value) {
-  if (!Array.isArray(value)) {
-    return [];
-  }
-  return Array.from(
-    new Set(
-      value.filter((entry) => typeof entry === "string").map((entry) => normalizeFolderPath(entry)).filter((entry) => entry.length > 0)
-    )
-  );
-}
-function parseFolderListInput(value) {
-  return normalizeFolderList(
-    value.split(/\r?\n|,/).map((entry) => entry.trim()).filter((entry) => entry.length > 0)
-  );
-}
-function formatFolderList(folders) {
-  return folders.join("\n");
-}
-function normalizeFolderPath(path) {
-  let normalizedPath = (0, import_obsidian.normalizePath)(path.trim());
-  while (normalizedPath.endsWith("/")) {
-    normalizedPath = normalizedPath.slice(0, -1);
-  }
-  return normalizedPath === "." ? "" : normalizedPath;
-}
-function isObjectRecord(value) {
-  return typeof value === "object" && value !== null;
-}
-var DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
-function formatDate(date) {
-  const year = String(date.getFullYear());
-  const month = String(date.getMonth() + 1).padStart(2, "0");
-  const day = String(date.getDate()).padStart(2, "0");
-  return `${year}-${month}-${day}`;
-}
-function normalizeDeferredUntil(value) {
-  const unquotedValue = unquoteFrontmatterValue(value);
-  return DATE_PATTERN.test(unquotedValue) ? unquotedValue : null;
-}
-function extractFrontmatterValue(content, key) {
-  const frontmatterMatch = content.match(FRONTMATTER_PATTERN);
-  if (!frontmatterMatch) {
-    return null;
-  }
-  const frontmatter = frontmatterMatch[1];
-  const valueMatch = frontmatter.match(new RegExp(`^${key}:\\s*(.+?)\\s*$`, "m"));
-  return valueMatch ? valueMatch[1] : null;
-}
-function normalizeFrontmatterBoolean(value) {
-  if (typeof value === "boolean") {
-    return value;
-  }
-  if (typeof value !== "string") {
-    return null;
-  }
-  switch (unquoteFrontmatterValue(value).toLowerCase()) {
-    case "true":
-    case "yes":
-    case "on":
-      return true;
-    case "false":
-    case "no":
-    case "off":
-      return false;
-    default:
-      return null;
-  }
-}
-function unquoteFrontmatterValue(value) {
-  if (value === null) {
-    return "";
-  }
-  const trimmedValue = value.trim();
-  return trimmedValue.startsWith('"') && trimmedValue.endsWith('"') || trimmedValue.startsWith("'") && trimmedValue.endsWith("'") ? trimmedValue.slice(1, -1) : trimmedValue;
-}

@@ -28,6 +28,18 @@ The plugin currently recognizes these note-level keys:
 - `deferred-until: YYYY-MM-DD`
 - `hide-from-vault-tasks: true`
 
+## Settings
+
+The plugin includes a small settings pane for vault-level conventions:
+
+- view defaults like open location and default filter
+- related-note and section-heading defaults
+- optional persisted section filter
+- standard vs extended task status actions
+- pending/completed filter behavior
+- include and exclude folder scope
+- note, section, and task sorting
+
 ## Development
 
 ```bash
@@ -39,6 +51,12 @@ Build once:
 
 ```bash
 npm run build
+```
+
+Run tests:
+
+```bash
+npm test
 ```
 
 To test in a vault, symlink this folder into:
