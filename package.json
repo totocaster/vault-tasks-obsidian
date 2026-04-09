@@ -1,6 +1,6 @@
 {
 	"name": "vault-tasks-view",
-	"version": "0.9.0",
+	"version": "0.9.1",
 	"description": "Collects Markdown tasks from every note into a grouped task view.",
 	"main": "main.js",
 	"scripts": {

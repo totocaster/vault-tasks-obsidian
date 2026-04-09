@@ -3,14 +3,10 @@ import {
 	DEFERRED_UNTIL_KEY,
 	FRONTMATTER_PATTERN,
 	HIDDEN_FROM_TASKS_KEY,
-	LEGACY_DEFERRED_UNTIL_KEY,
 } from "../config";
 
 export function extractDeferredUntil(content: string): string | null {
-	return normalizeDeferredUntil(
-		extractFrontmatterValue(content, DEFERRED_UNTIL_KEY) ??
-			extractFrontmatterValue(content, LEGACY_DEFERRED_UNTIL_KEY),
-	);
+	return normalizeDeferredUntil(extractFrontmatterValue(content, DEFERRED_UNTIL_KEY));
 }
 
 export function extractHiddenFromTaskList(content: string): boolean {

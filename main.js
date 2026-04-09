@@ -36,7 +36,6 @@ var import_obsidian4 = require("obsidian");
 var VIEW_TYPE_TASKS = "vault-tasks-view";
 var VIEW_TITLE = "Vault tasks";
 var DEFERRED_UNTIL_KEY = "deferred-until";
-var LEGACY_DEFERRED_UNTIL_KEY = "deffered-until";
 var HIDDEN_FROM_TASKS_KEY = "hide-from-vault-tasks";
 var TASK_STATUS_CANCELLED = "-";
 var TASK_STATUS_DEFERRED = ">";
@@ -116,10 +115,7 @@ function filterDescription(filter) {
 
 // src/lib/frontmatter.ts
 function extractDeferredUntil(content) {
-  var _a;
-  return normalizeDeferredUntil(
-    (_a = extractFrontmatterValue(content, DEFERRED_UNTIL_KEY)) != null ? _a : extractFrontmatterValue(content, LEGACY_DEFERRED_UNTIL_KEY)
-  );
+  return normalizeDeferredUntil(extractFrontmatterValue(content, DEFERRED_UNTIL_KEY));
 }
 function extractHiddenFromTaskList(content) {
   var _a;
@@ -2161,7 +2157,6 @@ var VaultTasksPlugin = class extends import_obsidian4.Plugin {
     try {
       await this.app.fileManager.processFrontMatter(file, (frontmatter) => {
         frontmatter[DEFERRED_UNTIL_KEY] = deferredUntil;
-        delete frontmatter[LEGACY_DEFERRED_UNTIL_KEY];
       });
       await this.refreshIndex();
     } catch (error) {

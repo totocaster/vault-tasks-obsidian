@@ -9,7 +9,6 @@ import type {
 export const VIEW_TYPE_TASKS = "vault-tasks-view";
 export const VIEW_TITLE = "Vault tasks";
 export const DEFERRED_UNTIL_KEY = "deferred-until";
-export const LEGACY_DEFERRED_UNTIL_KEY = "deffered-until";
 export const HIDDEN_FROM_TASKS_KEY = "hide-from-vault-tasks";
 export const TASK_STATUS_CANCELLED = "-";
 export const TASK_STATUS_DEFERRED = ">";

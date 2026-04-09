@@ -8,12 +8,10 @@ import {
 	normalizeFrontmatterBoolean,
 } from "../src/lib/frontmatter";
 
-test("extracts deferred-until from current and legacy keys", () => {
+test("extracts deferred-until from frontmatter", () => {
 	const current = `---\ndeferred-until: 2026-04-10\n---\n`;
-	const legacy = `---\ndeffered-until: 2026-04-11\n---\n`;
 
 	assert.equal(extractDeferredUntil(current), "2026-04-10");
-	assert.equal(extractDeferredUntil(legacy), "2026-04-11");
 });
 
 test("normalizes quoted deferred dates", () => {

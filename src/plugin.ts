@@ -10,7 +10,6 @@ import {
 import {
 	DEFERRED_UNTIL_KEY,
 	HIDDEN_FROM_TASKS_KEY,
-	LEGACY_DEFERRED_UNTIL_KEY,
 	TASK_STATUS_CANCELLED,
 	TASK_STATUS_DONE,
 	TASK_STATUS_TODO,
@@ -452,7 +451,6 @@ export default class VaultTasksPlugin extends Plugin {
 		try {
 			await this.app.fileManager.processFrontMatter(file, (frontmatter) => {
 				frontmatter[DEFERRED_UNTIL_KEY] = deferredUntil;
-				delete frontmatter[LEGACY_DEFERRED_UNTIL_KEY];
 			});
 			await this.refreshIndex();
 		} catch (error) {
