@@ -7,7 +7,7 @@
 		"dev": "node esbuild.config.mjs",
 		"build": "tsc --noEmit --skipLibCheck && node esbuild.config.mjs production",
 		"check": "tsc --noEmit --skipLibCheck",
-		"test": "tsx --test tests/**/*.test.ts"
+		"test": "tsx --test tests/*.test.ts"
 	},
 	"keywords": [
 		"obsidian",
