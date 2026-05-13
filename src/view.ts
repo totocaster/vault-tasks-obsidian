@@ -1079,11 +1079,11 @@ export class VaultTasksView extends ItemView {
 
 		while (nextBlockEl) {
 			const paragraphEl =
-				nextBlockEl instanceof HTMLParagraphElement
+				nextBlockEl.instanceOf(HTMLParagraphElement)
 					? nextBlockEl
 					: nextBlockEl.querySelector(":scope > p");
 
-			if (!(paragraphEl instanceof HTMLParagraphElement)) {
+			if (paragraphEl === null || !paragraphEl.instanceOf(HTMLParagraphElement)) {
 				return;
 			}
 

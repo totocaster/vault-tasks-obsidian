@@ -1790,8 +1790,8 @@ var VaultTasksView = class extends import_obsidian3.ItemView {
     const headingBlockEl = (_a = headingEl.closest(".el-h2")) != null ? _a : headingEl;
     let nextBlockEl = headingBlockEl.nextElementSibling;
     while (nextBlockEl) {
-      const paragraphEl = nextBlockEl instanceof HTMLParagraphElement ? nextBlockEl : nextBlockEl.querySelector(":scope > p");
-      if (!(paragraphEl instanceof HTMLParagraphElement)) {
+      const paragraphEl = nextBlockEl.instanceOf(HTMLParagraphElement) ? nextBlockEl : nextBlockEl.querySelector(":scope > p");
+      if (paragraphEl === null || !paragraphEl.instanceOf(HTMLParagraphElement)) {
         return;
       }
       const text = (_c = (_b = paragraphEl.textContent) == null ? void 0 : _b.trim()) != null ? _c : "";
@@ -2155,9 +2155,12 @@ var VaultTasksPlugin = class extends import_obsidian4.Plugin {
   }
   async setDeferredUntil(file, deferredUntil) {
     try {
-      await this.app.fileManager.processFrontMatter(file, (frontmatter) => {
-        frontmatter[DEFERRED_UNTIL_KEY] = deferredUntil;
-      });
+      await this.app.fileManager.processFrontMatter(
+        file,
+        (frontmatter) => {
+          frontmatter[DEFERRED_UNTIL_KEY] = deferredUntil;
+        }
+      );
       await this.refreshIndex();
     } catch (error) {
       const message = error instanceof Error ? error.message : "Could not update the defer-until date.";
@@ -2166,9 +2169,12 @@ var VaultTasksPlugin = class extends import_obsidian4.Plugin {
   }
   async hideFromTaskList(file) {
     try {
-      await this.app.fileManager.processFrontMatter(file, (frontmatter) => {
-        frontmatter[HIDDEN_FROM_TASKS_KEY] = true;
-      });
+      await this.app.fileManager.processFrontMatter(
+        file,
+        (frontmatter) => {
+          frontmatter[HIDDEN_FROM_TASKS_KEY] = true;
+        }
+      );
       await this.refreshIndex();
       new import_obsidian4.Notice(
         `Hidden from vault tasks. Remove \`${HIDDEN_FROM_TASKS_KEY}: true\` to show it again.`

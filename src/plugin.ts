@@ -140,7 +140,7 @@ export default class VaultTasksPlugin extends Plugin {
 	}
 
 	private async loadSettings(): Promise<void> {
-		const loadedSettings = await this.loadData();
+		const loadedSettings: unknown = await this.loadData();
 		this.settings = normalizeSettings(loadedSettings);
 		this.filter = this.settings.defaultFilter;
 		this.showConnections = this.settings.showConnectionsByDefault;
@@ -449,9 +449,12 @@ export default class VaultTasksPlugin extends Plugin {
 
 	async setDeferredUntil(file: TFile, deferredUntil: string): Promise<void> {
 		try {
-			await this.app.fileManager.processFrontMatter(file, (frontmatter) => {
-				frontmatter[DEFERRED_UNTIL_KEY] = deferredUntil;
-			});
+			await this.app.fileManager.processFrontMatter(
+				file,
+				(frontmatter: Record<string, unknown>) => {
+					frontmatter[DEFERRED_UNTIL_KEY] = deferredUntil;
+				},
+			);
 			await this.refreshIndex();
 		} catch (error) {
 			const message =
@@ -462,9 +465,12 @@ export default class VaultTasksPlugin extends Plugin {
 
 	async hideFromTaskList(file: TFile): Promise<void> {
 		try {
-			await this.app.fileManager.processFrontMatter(file, (frontmatter) => {
-				frontmatter[HIDDEN_FROM_TASKS_KEY] = true;
-			});
+			await this.app.fileManager.processFrontMatter(
+				file,
+				(frontmatter: Record<string, unknown>) => {
+					frontmatter[HIDDEN_FROM_TASKS_KEY] = true;
+				},
+			);
 			await this.refreshIndex();
 			new Notice(
 				`Hidden from vault tasks. Remove \`${HIDDEN_FROM_TASKS_KEY}: true\` to show it again.`,

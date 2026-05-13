@@ -1,6 +1,6 @@
 {
 	"name": "vault-tasks-view",
-	"version": "0.9.1",
+	"version": "0.9.2",
 	"description": "Collects Markdown tasks from every note into a grouped task view.",
 	"main": "main.js",
 	"scripts": {
@@ -17,7 +17,6 @@
 	"license": "MIT",
 	"devDependencies": {
 		"@types/node": "^20.16.5",
-		"builtin-modules": "^3.3.0",
 		"esbuild": "^0.25.4",
 		"obsidian": "latest",
 		"tsx": "^4.20.6",
